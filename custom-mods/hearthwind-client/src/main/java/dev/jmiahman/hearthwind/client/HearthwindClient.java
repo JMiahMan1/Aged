@@ -134,6 +134,7 @@ public class HearthwindClient implements ClientModInitializer {
             JobHud.register();
             SeasonHud.register();
             SkillToast.register();
+            GateHintHud.register();
             DownedHud.register();
             BlockTargetHud.register();
             NutrientsKey.init();

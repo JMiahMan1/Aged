@@ -19,6 +19,7 @@ import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
@@ -360,7 +361,8 @@ public final class SkillGates {
             }
             Gate gate = breakGate(state);
             if (!allowed(sp, gate)) {
-                deny(sp, gate, "break");
+                deny(sp, gate, "break",
+                        BuiltInRegistries.BLOCK.getKey(state.getBlock()));
                 return false;
             }
             return true;
@@ -371,7 +373,9 @@ public final class SkillGates {
             }
             Gate gate = useGate(world.getBlockState(hitResult.getBlockPos()).getBlock());
             if (gate != null && !allowed(sp, gate)) {
-                deny(sp, gate, "use");
+                deny(sp, gate, "use",
+                        BuiltInRegistries.BLOCK.getKey(
+                                world.getBlockState(hitResult.getBlockPos()).getBlock()));
                 return InteractionResult.FAIL;
             }
             return InteractionResult.PASS;
@@ -383,7 +387,9 @@ public final class SkillGates {
             ItemStack held = player.getItemInHand(hand);
             Gate gate = itemGate(held);
             if (gate != null && !allowed(sp, gate)) {
-                deny(sp, gate, "use");
+                deny(sp, gate, "use",
+                        held.isEmpty() ? Identifier.fromNamespaceAndPath("minecraft", "air")
+                                : net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(held.getItem()));
                 return InteractionResult.FAIL;
             }
             return InteractionResult.PASS;
@@ -394,7 +400,8 @@ public final class SkillGates {
             }
             Gate gate = entityGate(entity);
             if (gate != null && !allowed(sp, gate)) {
-                deny(sp, gate, "interact with");
+                deny(sp, gate, "interact with",
+                        net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()));
                 return InteractionResult.FAIL;
             }
             return InteractionResult.PASS;
@@ -410,13 +417,24 @@ public final class SkillGates {
         // The actual blocking is done in CraftingGateMixin which reads CRAFT_GATES.
     }
 
-    private static void deny(ServerPlayer player, Gate gate, String verb) {
+    private static void deny(ServerPlayer player, Gate gate, String verb,
+            Identifier targetId) {
         if (player == null) {
             return;
         }
         player.sendOverlayMessage(Component.literal(
                 "You need " + gate.skill().id + " level " + gate.level()
                         + " to " + verb + " this."));
+        // Structured hint for the client HUD (toast instead of the raw
+        // overlay line). Best-effort: a single send failure must never turn
+        // a denied action into an allowed one.
+        try {
+            net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(
+                    player,
+                    new SkillGateHintPayload(gate.skill().id, gate.level(),
+                            verb, targetId));
+        } catch (Exception ignored) {
+        }
     }
 
     /** For gametests: expose loaded counts without leaking internals. */
