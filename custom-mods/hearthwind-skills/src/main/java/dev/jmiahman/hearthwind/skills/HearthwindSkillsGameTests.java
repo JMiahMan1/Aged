@@ -14,9 +14,10 @@ public final class HearthwindSkillsGameTests {
 
     @GameTest
     public void levelCurveIsMonotonicAndCapped(GameTestHelper helper) {
-        SkillsConfig.get().levels.baseXpPerLevel = 30;
-        helper.assertTrue(SkillXp.xpForLevel(1) == 30, "level 1 costs 30");
-        helper.assertTrue(SkillXp.xpForLevel(2) == 90, "level 2 cumulative 90");
+        // Aged/LevelZ curve: cost(L) = (int)(25 + 1.6*L).
+        helper.assertTrue(SkillXp.xpForLevel(1) == 25, "level 1 costs 25");
+        helper.assertTrue(SkillXp.xpForLevel(2) == 51, "level 2 cumulative 51 (25+26)");
+        helper.assertTrue(SkillXp.xpForLevel(3) == 79, "level 3 cumulative 79 (25+26+28)");
         long prev = -1;
         for (int l = 0; l <= SkillXp.maxLevel(); l++) {
             long cost = SkillXp.xpForLevel(l);
@@ -25,8 +26,8 @@ public final class HearthwindSkillsGameTests {
         }
         helper.assertTrue(SkillXp.levelFor(Long.MAX_VALUE)
                 == SkillXp.maxLevel(), "levels cap at maxLevel");
-        helper.assertTrue(SkillXp.levelFor(29) == 0
-                && SkillXp.levelFor(31) == 1, "boundary at first level");
+        helper.assertTrue(SkillXp.levelFor(24) == 0
+                && SkillXp.levelFor(25) == 1, "boundary at first level");
         helper.succeed();
     }
 
@@ -37,8 +38,8 @@ public final class HearthwindSkillsGameTests {
         SkillXp.addXp(pig, Skill.MINING, 50);
         helper.assertTrue(SkillXp.xp(pig, Skill.MINING) == 150.0,
                 "xp accumulates in attachment");
-        helper.assertTrue(SkillXp.level(pig, Skill.MINING) == 2,
-                "150 xp with base 30 = level 2 (curve 30/90/180...)");
+        helper.assertTrue(SkillXp.level(pig, Skill.MINING) == 5,
+                "150 xp on the Aged curve (cumulative 25/51/79/108/139/172) = level 5");
         helper.assertTrue(SkillXp.xp(pig, Skill.ARCHERY) == 0.0,
                 "other skills untouched");
         helper.succeed();
@@ -210,6 +211,23 @@ public final class HearthwindSkillsGameTests {
         helper.succeed();
     }
 
+    @GameTest
+    public void craftingGateDeniesWithoutLevel(GameTestHelper helper) {
+        SkillGates.load(helper.getLevel().getServer().getResourceManager());
+        var goldenPick = new net.minecraft.world.item.ItemStack(
+                net.minecraft.world.item.Items.GOLDEN_PICKAXE);
+        SkillGates.Gate gate = SkillGates.craftGate(goldenPick);
+        helper.assertTrue(gate != null && gate.level() == 8,
+                "golden pickaxe requires crafting level 8, got " + gate);
+        var player = newPlayer(helper);
+        helper.assertTrue(!SkillGates.allowed(player, gate),
+                "fresh player must not pass a level-8 crafting gate");
+        helper.assertTrue(SkillGates.craftGate(
+                net.minecraft.world.item.ItemStack.EMPTY) == null,
+                "empty stack never gated");
+        helper.succeed();
+    }
+
     private static int gateLevel(SkillGates.Gate gate) {
         return gate == null ? -1 : gate.level();
     }
@@ -353,6 +371,19 @@ public final class HearthwindSkillsGameTests {
         SkillXp.addXp(pig, Skill.HEALTH, SkillXp.xpForLevel(5));
         double bonus = SkillAttributes.bonusFor(pig, Skill.HEALTH);
         helper.assertTrue(bonus == -4.0, "5 health levels x 2.0 = -4.0 HP modifier (16 HP total = 8 hearts)");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void skillSetMatchesLevelzParity(GameTestHelper helper) {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (var skill : Skill.values()) {
+            ids.add(skill.id);
+        }
+        java.util.Set<String> expected = java.util.Set.of("farming", "mining", "smithing", "strength",
+                "agility", "defense", "health", "stamina", "luck", "archery", "alchemy", "trade");
+        helper.assertTrue(ids.equals(expected), "skill set must be the 12 levelz-parity skills, got " + ids);
+        helper.assertTrue(SkillXp.maxLevel() == 30, "max level must be the levelz cap 30");
         helper.succeed();
     }
 
