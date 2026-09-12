@@ -61,6 +61,10 @@ How far CI can go:
 2. **Custom mods**: `cd custom-mods && ./gradlew build`. Copy the plain
    jar into a test server (NEVER the `-sources` jar - its unexpanded
    fabric.mod.json poisons logs with `${version}` warnings).
+   After every milestone build, refresh the Prism physical-test installs:
+   `cd custom-mods && bash tools/update_prism.sh` (updates Hearthwind-Full,
+   Hearthwind-Minimal, Hearthwind-Dev-Client in place; `--deploy-new <inst>`
+   to ship a newly built module).
 3. **Every change ships verified**: boot test + RCON checks. No "should
    work" claims.
 
@@ -75,8 +79,24 @@ How far CI can go:
 cd custom-mods && bash tools/run_gametests.sh [--keep-server]
 # -> builds all modules, boots a throwaway 26.2 server, runs every @GameTest,
 #    prints "gametests: N/M passed", exits nonzero on failure
-#    (204 server gametests green: survival + skills + jobs + primitive + world + smallships;
+#    (257 server gametests green: survival + skills + jobs + primitive + world + smallships;
 #    client gametests PASS: nutrients + screens tour + diet + mining gate arc + pack-server connect + biome temp)
+```
+
+CONTAINER MANDATE: never run game/client tests on the host. Build on the
+host (`./gradlew build`), then run the container wrappers (they stage
+host-built jars + sources into /tmp/cgthearthwind-stage — Docker Desktop
+cannot bind-mount /Users paths, and its file sharing intermittently serves
+empty dirs, so staging goes through a seeded named volume `cgtvol`):
+
+```bash
+cd custom-mods && bash tools/run_gametests_container.sh [--keep-server]
+cd custom-mods && bash tools/run_client_gametests_container.sh [--keep-dir]
+# -> same harnesses inside pinned linux images (java 26); screenshots copy
+#    back to .tmp/shots/cgt/. Stage script: tools/stage_container_tests.sh.
+#    Server suite needs custom-mods/.gradle/loom-cache (merged jar for the
+#    mixin-shadow test) - staged automatically. Set JAVA_HOME explicitly in
+#    containers (run_gametests.sh defaults to a Cellar path).
 ```
 
 REAL-CLIENT gametests (fabric-client-gametest-api-v1, headless, no

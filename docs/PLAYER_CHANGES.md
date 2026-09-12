@@ -27,10 +27,11 @@ Vanilla Minecraft only tracks hunger. Hearthwind adds:
 
 | System | What you see | Rules |
 |---|---|---|
-| **Thirst** | 10 blue teardrops in the 9-px band immediately above hunger, right-aligned to hotbar right edge, with a 13×13 glass flask icon on the left. Drinking dirty water shifts droplets from blue to murky green for the duration of the thirst debuff. | **Scale** `dehydration:hydration` 0..20. **Drain** `baseDrain 0.025` (~13m empty) ×2 sprint +0.05 per `thirst` amp. **Drink** the leather flask (+4 per sip), and **eating or drinking any catalogued food now rehydrates you**: melon slice +1, glow berries and chorus fruit +2, stews +3, apple +4, golden apple +6, milk bucket +8 - 38 foods and drinks are catalogued across 12 tiers (`config/hearthwind_survival.json`: `thirst.useHydrationCorpus`, `hydrationCorpusScale`). Empty-hand on water gives +0.5 dirty sip with a 3s cooldown and inflicts temporary `dehydration:thirst` (green teardrop HUD). |
-| **Body temperature** | Bottom-anchored 16×32 authentic EnvironmentZ glass thermometer & reservoir to the right of hotbar + 12×12 "F" unit box + trend chevron | Scale -10..10. Drifts toward a biome + season target, then the environment adds: **lit** campfires, furnaces, blast furnaces, smokers and magma blocks warm you (+3 adjacent, +2 one block away, +1 two blocks), snow and ice cool you (ice -3 adjacent); at most two of any one source count. **Shelter pays** - a fire in an enclosed room gets a +50% bonus, while standing under a roof costs -1 (shade). Altitude, wetness (soaked -6 / rain -3), worn armor (+1, insulated +3, iced -4) and day/night all come from the same tuning tables. At **-8** freeze damage, at **+9** heat exhaustion & burn damage. |
-| **Diet & Nutrition** | 5 nutrient groups (Fruits `#E54016`, Vegetables `#F1910C`, Grains `#F0DE1A`, Proteins `#64CA0C`, Sugars `#99916E`) in a 176×166 vanilla-grey panel (`N` key or tab) | Five segmented 140×5 bars at 24 GUI px pitch. Each group decays over time. Neglecting a group inflicts deficiency debuffs (no fruits = mining fatigue, no grains = slowness, no proteins/vegetables = weakness). Balanced diet grants regeneration & healing saturation. |
-| **Food Spoilage** | Food slowly rots in inventory & containers | Perishable meats, fish, and produce rot into rotten flesh over time - twice as fast in hot biomes. Sealed teas, alcohol, and honey never spoil. |
+| **Thirst** | 10 blue teardrops in the 9-px band immediately above hunger, right-aligned to hotbar right edge, with a 13×13 glass flask icon on the left. Drinking dirty water shifts droplets from blue to murky green for the duration of the thirst debuff. | **Scale** `dehydration:hydration` 0..20. **Drain** `baseDrain 0.025` (~13m empty) ×2 sprint +0.05 per `thirst` amp. **Drink** the leather flask (+4 per sip), and **eating or drinking any catalogued food now rehydrates you**: melon slice +1, glow berries and chorus fruit +2, stews +3, apple +4, golden apple +6, milk bucket +8 - 38 foods and drinks are catalogued across 12 tiers (`config/hearthwind_survival.json`: `thirst.useHydrationCorpus`, `hydrationCorpusScale`). Empty-hand on still water while sneaking: hold right-click ~4s to drink +1 with gulp sounds, may inflict temporary `dehydration:thirst` (green teardrop HUD, halved chance in rivers), and consumes the source block. **Purified water** (`dehydration:purified_water` fluid/block/bucket — smelt a water bucket to get one) never inflicts thirst. |
+| **Body temperature** | Bottom-anchored 13×13 body-status icon at (screen centre - 7, bottom - 52) + 16×32 glass thermometer at (centre + 95, bottom - 32); no unit box or trend arrow | Faithful EnvironmentZ 2.0.8 port (data values mirror the version Aged 3.1.2 ships). **Body temperature** is an integer **-2400..+2400** recomputed once per 10 ticks: bands -2400 very cold / -1800 freezing / -240 comfortable / +240 hot / +1800 overheating / +2400. **Thermometer** reads a separate -6..+6 value driven only by climate, shade, height and nearby heat. **Seasons** shift both body and thermometer (winter -3, summer +2, spring +0.5, autumn 0; `daysPerSeason = 18`). **Heat sources** (lava 4/3/2/1, campfire, soul campfire, fire, soul fire, magma, lava cauldron, lit furnace/blast furnace/smoker: 3/2/1/0; torch/soul torch 1 at 0) only count within 3 blocks with a clear line of sight, at most `max_count` of each; snow/ice cool -3/-2/-1. **Worn armor** +1/piece, insulated (polar bear fur, wolf/leather) +3/piece, iced chainmail-style armor -5 and wears off one charge per calculation; **warm armor +3 takes precedence** over its +1. **Wetness 0..200**: water +100, rain +1, dries -1 per calculation, soaked (≥180) costs -6 and any wet costs -3. **Shade** (no sky) -1. **Height**: +2 below y=0, +1 below y=30, 0 up to y=120, -1 above, -2 above y=190. **Acclimatization** pulls you back to comfort (±10/±15 at ±180/±1600), and cold/heat resistance+protection pools (max 600, from items and effects) soak the incoming delta before your body changes. **Debuffs** by band: cold -8% speed, freezing -25% speed / -20% attack speed, hot -12% attack damage, overheating -30% attack damage / -20% attack speed. At **-2400** you take 1 freezing damage; at **+2400** you gain 0.07 exhaustion. |
+| **Diet & Nutrition** | Five nutrients - **Carbs, Protein, Fat, Vitamins, Minerals** (NutritionZ 1.0.11 parity) - in the original 176×142 nutrients panel on the `N` key or the 9×9 inventory tab; **hold Shift** on any catalogued food for its nutrition tooltip | Each nutrient is an integer `0..300` starting at 150. Eating/drinking adds the item's positive values from the full Aged NutritionZ corpus (vanilla + bakery/brewery/candlelight/farm_and_charm/herbalbrews/meadow/vinery/nethervinery/dehydration/naturalist/natures_spirit/adventurez compat). Losing a hunger point to exhaustion decays all five by 1. At **≤30** the datapack's negative effects fire, at **≥270** the positive ones (long status effects + attribute modifiers): low vitamins = Weakness, high vitamins = Regeneration, high carbs = +attack/move speed, high protein = +damage/knockback, high fat = +armor, high minerals = Haste. Hover the left/right ends of a bar to preview its effects. |
+| **Food Spoilage** | Food slowly rots in inventory & containers | Perishable meats, fish, and produce rot into rotten flesh over time - twice as fast in hot biomes. Sealed teas, alcohol, and honey never spoil. **Tanning**: 4 rotten flesh craft into 1 leather. |
+| **Sobriety** (default ON) | No beer, wine, whiskey, or mead anywhere: no recipes, no creative-tab entries | `config/hearthwind_survival.json`: `sobriety.removeAlcohol` (default `true`). Alcohol content lives in `vinery_alcohol` / `brewery_alcohol` built-in packs that only load when the flag is off. Sober replacements always brew: vinery grape juices + apple juice + honey cordial + apple cider; brewery **sassafras root beer** (sugar + sweet berries + hops, hearty), **small beer** (wheat + hops, restorative), **kvass** (bread + sugar + yeast, restorative), **coffee** (cocoa + sugar + grain, energizing). HerbalBrews teas/coffees are naturally alcohol-free. |
 | **Downed & Revive** | 60s bleedout state upon lethal damage | Downed players crawl and call for help; teammates can channel for 3s to revive them at 3 hearts. |
 
 ## Skills & Content Gates (LevelZ corpus, read from the datapack)
@@ -41,7 +42,9 @@ rebuild. **676 gates are active**: 303 mining, 162 smithing, 148 crafting, 23 br
 
 - **Mining Gates**: Mud Bricks (1), Sandstone (2), Bricks (3), **Stone and Cobblestone (5)**, Diorite (6), Andesite (8), Granite (10), Terracotta (11), **Iron Ore (13)**, Deepslate (18), **Diamond (21)**, Obsidian (25), Netherite (27). Breaking a gated block shows the skill and level you need.
 - **Earning your first Mining levels**: every pickaxe-mineable block is gated, so the loose **surface rocks and flint** you pick up are the tier-0 mining activity — breaking them is what raises Mining from 0. You also start with 2 skill points to spend as soon as you join.
+- **Surface rock & flint spawning (earlystage parity)**: mounds generate only in forest/hill/mountain/river biomes plus mushroom fields and stony shores, on bare dirt or stone with open sky — not in oceans, deserts, or on grass. Look for bare-dirt patches, not open plains.
 - **Use Gates**: Furnaces, Anvils, Smithing Tables (Smithing), Brewing Stands & Cauldrons (Alchemy), Smokers & Beehives (Farming), Grindstones (Strength), Cartography Tables (Agility).
+- **Crafting Gates**: gated results never appear in the crafting output (golden pickaxe needs Mining 8, diamond armor needs Defense 24) - denied crafts show the skill and level you need.
 - **Item & Entity Gates**: Certain items need a skill level to use, and breeding/taming livestock is gated behind Farming and Agility.
 
 ### Skill capstones (LevelZ procs)
@@ -60,8 +63,8 @@ Mastering a skill past the level curve unlocks a passive perk. Chances and bonus
 Eight optional professions (Miner, Farmer, Fisher, Warrior, Smither, Brewer, Builder, Lumberjack):
 - Join and manage via `/job join <job>`, `/job leave`, `/job info`.
 - Earn XP by performing trade-specific tasks following the job ladder.
-- Crafting is gated by **skill** levels, not jobs.
-- Respects Age technology gating (e.g., Smither & Brewer unlock in Iron Age+).
+- Crafting is gated by **skill** levels always; per-job recipe gating is opt-in (`jobCraftGating`, default off).
+- Respects Age technology gating: **Smither & Brewer unlock at Copper Age (Age 2)** - joining earlier fails, and their level-up bonus items are withheld until Age 2.
 
 ## Flora, Crops, Agriculture & Wildlife (Complete Aged Parity)
 
@@ -89,7 +92,7 @@ Eight optional professions (Miner, Farmer, Fisher, Warrior, Smither, Brewer, Bui
   - Season duration set to **18 days** (`daysPerSeason = 18`).
   - Top-left HUD widget at GUI `(2, 2)` displaying 9×9 season icon + single-line formatted text: `"[Icon] Season, Day N/18"`.
   - Season text tinting: Spring `#FFA3BB`, Summer `#FEE92A`, Autumn `#BC5E27`, Winter `#E0FCFC`.
-  - Per-crop seasonal growth multipliers (15 crop types loaded from `seasons/crop/*.json`).
+  - Per-crop seasonal growth multipliers (37 crop types loaded from `seasons/crop/*.json`: 15 vanilla + tomato/lettuce/strawberry/corn/onion/oats/barley, tea/coffee/rooibos/yerba-mate, all grape bushes, hops — frost-tender crops stall in winter, hardy oats/barley creep, grapes peak in fall).
 - **River Currents & Ocean Swell**:
   - Gentle downhill river flow and oceanic tidal wave swell.
   - Directional splash, surface bubbles, and bubble pops (`ParticleTypes.SPLASH` / `ParticleTypes.BUBBLE_POP` / `ParticleTypes.BUBBLE`) visibly stream in the direction of the water current.
@@ -102,8 +105,33 @@ Eight optional professions (Miner, Farmer, Fisher, Warrior, Smither, Brewer, Bui
   - Custom HearthWind panoramic start screen with cabin and autumnal breeze.
   - Left-aligned button stack at `x = width / 9` with authentic hover tints (`#EEDAC3`, `#A1B8B5`, `#6AA7BA`, `#BFA8BF`, `#EB9484`).
   - Top-right 20×20 icon buttons (Discord, Modrinth, Language, Accessibility).
-- **Inventory Tab Strip**:
-  - 4 tabs above vanilla `#C6C6C6` panels (Inventory Bag, Skills Tablet, Jobs Clipboard, Nutrients Apple) at 25 GUI px pitch.
+- **Inventory Tab Strip (Aged 3.1.2 parity)**:
+  - The four LibZ tabs (Inventory Bag / Skills / Jobs / Party) sit above every
+    aged panel at the modpack's exact geometry: 25 GUI px pitch, 24 px wide
+    raised-selected / lowered-unselected backgrounds from the bundled LibZ
+    sheet, vanilla-item tab icons, hover tooltips. Clicking a tab switches
+    screens; the bag tab returns to the vanilla inventory.
+- **Skills screen (`K`)**:
+  - Rebuilt to the Aged LevelZ layout: 200x215 panel, "&lt;Name&gt; Skills"
+    title, live player model preview, six attribute readouts (health, defense,
+    agility, strength, stamina, luck) in a 3x2 grid, "Level N / Points N"
+    line, segmented XP bar with "Xp n / next" (Aged 25 + 1.6L curve), a "?"
+    help page, and twelve skill rows (two columns of six) with [+] buttons
+    that spend one experience level per press.
+- **Jobs screen (`J`)**:
+  - Rebuilt to the Aged JobsAddon layout: 200x215 panel, "&lt;Name&gt; Jobs"
+    title, "Job Cooldown: MM:SS" and employed summary, then eight job cards
+    (icon slot, name, centred "Lv. N", segmented XP bar). **You may now hold
+    up to 3 jobs at once** (Aged `employedJobs`), job XP is kept per job even
+    after leaving, and changing jobs starts the Aged **20-minute change
+    cooldown** (24000 ticks). Joining/leaving uses the same `/job` command
+    path as before.
+- **Party screen (`P`)**:
+  - Rebuilt on the shared Aged panel: left column lists party members with
+    player heads, distance and health bars; right column shows party name,
+    member count, role, PvP state and the PvP toggle / Leave / Disband
+    buttons. Invitations are not modelled by our party subsystem, so
+    PartyAddon's invitation column is intentionally omitted.
 
 ## Biomes, Nether Exploration & Overworld Frontiers
 
@@ -114,7 +142,7 @@ Eight optional professions (Miner, Farmer, Fisher, Warrior, Smither, Brewer, Bui
   - **Unique Spores & Flora**: Harvesting crops and soul spores provides brewing and composting resources.
 - **Nature's Spirit (Overworld Flora & Biomes)**:
   - Diverse array of natural biomes, blooming canopies, and regional soil varieties (Kaolin clay).
-  - All wild fruits, vegetables, grains, and nuts from Nature's Spirit are fully integrated with the 5-group Diet & Nutrition system.
+  - All wild fruits, vegetables, grains, and nuts from Nature's Spirit ship with NutritionZ Carbs/Protein/Fat/Vitamins/Minerals values.
 - **YUNG's Dungeon & Fortress Overhauls**:
   - Massive architectural overhauls for Nether Fortresses, End Islands, Desert Temples, Jungle Temples, and Ocean Monuments.
 - **Villages & Pillages**:
@@ -122,4 +150,10 @@ Eight optional professions (Miner, Farmer, Fisher, Warrior, Smither, Brewer, Bui
 - **Sailable Ships & Ocean Voyages (Small Ships)**:
   - Multi-tier craftable watercraft: **Cog**, **Brigg**, **Galley**, and **Drakkar**.
   - Functional shipboard cannons, mountable swivel guns, dyeable canvas sails, and onboard storage holds.
+
+### 26.2 Port Status
+- Verified 2026-09-11: `./gradlew build` green; server gametests **257/257 passed** (container); client gametests **PASS** (container, 14 screenshots).
+- `letsdo-*` family builds green in-tree (candlelight/meadow API errors resolved since the last audit).
+- Wave-1 contrib ports (2026-09-12): Chipped + Athena sources staged inert under `custom-mods/` (not yet wired — no gameplay effect yet); fork-port queue ranked in `docs/DROPPED_78_STUDY.md`.
+- Mechanical Age (Create wind/water wheels, smithing 18 / builder 3 preview): not started - Create is not in the pack yet, so there is nothing to gate.
 

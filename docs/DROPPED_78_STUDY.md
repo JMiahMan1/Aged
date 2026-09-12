@@ -4,6 +4,42 @@ Status snapshot 2026-08-29 (Modrinth API, raw: `.tmp/modrinth_status.json`).
 **Policy (user directive, 2026-08-29): NO mod is dropped — ever.** Every mod
 below has a concrete path back into the pack:
 
+## 2026-09-12 mod-parity review (supersedes Sequencing below)
+
+Full Aged 3.1.2 (212 mod jars) vs pack audit: **everything with a 26.2
+upstream build is deployed** (cross-checked `resolved.json` picks against
+server mod ids — zero ready-but-missing). User decisions recorded:
+
+- **Fork-port queue is live, structures first.** Wave 1 ranked by feasibility
+  (Modrinth probe 2026-09-12 — loaders, max MC, source):
+  1. `dungeonz` (fabric ≤1.21.1, github Globox1997 — same family as our other Globox work)
+  2. `lukis-grand-capitals` (ships a datapack loader ≤1.21.11 — data-only port may suffice)
+  3. `spider-caves` (fabric ≤1.20.4, github HexagonNico — small)
+  4. `profundis` (fabric ≤1.21.4, github firenh — cave biomes)
+  5. `Dungeon Now Loading` (fabric ≤1.20.1, github hexnowloading — heavy NBT set)
+  6. `dungeons+` LAST (forge/neoforge ONLY, gitlab modding-legacy — fabric port is a rewrite)
+  - Re-locate first (404 on current slugs): `desert-dungeon`, `u_desert`,
+    `underground-jungle`, `betterendcitiesvanilla`, `mns`, `mes`.
+- Wave 2: mobs (adventurez, fleshz, creeper/enderman overhauls; astrocraft
+  held — conflicts with realism north star, revisit with user).
+- Wave 3: gear/decor/utility (inmis+backslot+trinkets cluster as ONE best,
+  amarite, medievalweapons, chipped+athena, another_furniture, bbb,
+  couplings, villager-transportation, smarterfarmers, exposure,
+  antique-atlas, Pockets, async-locator, noisium).
+- **Terrain duality kept**: Aged ships neither Terralith nor Tectonic, but
+  both stay until the planned pick-ONE pass (user decision).
+- **Solved since 8-29** (no port needed): herdspanic→`HerdPanic.java`,
+  revive→survival `revive/` package, rpgdifficulty→skills `MobScaling`,
+  seasonhud/crop_growth_modifier→world seasons-lite, naturalist→world
+  `fauna/`, endrem/exposure/antique-atlas→world item ports (quest loops TBD),
+  emi family→REI substitute, letsdo family→`letsdo-*` ports, Tier 1 adoptions
+  (ExtendedDrawers, scholar, chalk pair, supermartijn libs, Boids,
+  true-ending, MRU) all deployed, birdsboids deployed.
+- **Pins**: architectury capped at 21.0.7 while loader is 0.19.3 / api
+  0.159.0 (21.1.9+ needs loader≥0.19.5, api≥0.160.0 — broke boot 2026-09-12;
+  see manifest note. `resolve_deps.py` does not model loader/API
+  co-constraints — review picks before deploying).
+
 - **adopt** — a 26.x build exists today; flip `mods-manifest.json` to `keep`
   and let the resolver pick it up.
 - **watchlist** — author active on 26.1.x; auto-resolves on a future bump;
