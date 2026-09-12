@@ -203,6 +203,23 @@ public final class HearthwindPrimitiveGameTests {
     }
 
     @GameTest
+    public void rockMoundDropsRockLikeEarlystage(GameTestHelper helper) {
+        // Parity with earlystage data/earlystage/loot_tables/blocks/rock.json:
+        // one roll yielding the rock item itself.
+        net.minecraft.core.BlockPos rel = new net.minecraft.core.BlockPos(1, 2, 1);
+        helper.setBlock(rel, HearthwindPrimitiveBlocks.ROCK.defaultBlockState());
+        var player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(net.minecraft.world.level.GameType.SURVIVAL);
+        boolean broke = player.gameMode.destroyBlock(helper.absolutePos(rel));
+        helper.assertTrue(broke, "rock mound must break");
+        net.minecraft.world.phys.AABB box = new net.minecraft.world.phys.AABB(helper.absolutePos(rel)).inflate(3.0);
+        boolean dropped = !helper.getLevel().getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, box,
+                e -> e.getItem().is(HearthwindPrimitiveBlocks.ROCK.asItem())).isEmpty();
+        helper.assertTrue(dropped, "breaking a rock mound must drop the rock item (earlystage parity)");
+        helper.succeed();
+    }
+
+    @GameTest
     public void flintToolStatsAreReasonable(GameTestHelper helper) {
         var pickaxe = new net.minecraft.world.item.ItemStack(HearthwindPrimitiveItems.FLINT_PICKAXE);
         helper.assertTrue(pickaxe.is(HearthwindPrimitiveItems.FLINT_PICKAXE),
@@ -227,6 +244,20 @@ public final class HearthwindPrimitiveGameTests {
         helper.assertTrue(HearthwindPrimitiveItems.COPPER_NUGGET != null, "copper nugget exists");
         helper.assertTrue(HearthwindPrimitiveItems.RAW_IRON_NUGGET != null, "raw iron nugget exists");
         helper.assertTrue(HearthwindPrimitiveItems.RAW_GOLD_NUGGET != null, "raw gold nugget exists");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void tanningRecipeParses(GameTestHelper helper) {
+        boolean found = false;
+        for (var holder : helper.getLevel().recipeAccess().getRecipes()) {
+            if (holder.id().identifier().equals(net.minecraft.resources.Identifier.parse(
+                    "earlystage:leather_from_rotten_flesh"))) {
+                found = true;
+                break;
+            }
+        }
+        helper.assertTrue(found, "4 rotten flesh must tan into leather (Age 1 parity)");
         helper.succeed();
     }
 
@@ -715,7 +746,7 @@ public final class HearthwindPrimitiveGameTests {
         helper.setBlock(pos, net.minecraft.world.level.block.Blocks.BLAST_FURNACE);
         var be = helper.getBlockEntity(pos,
                 net.minecraft.world.level.block.entity.BlastFurnaceBlockEntity.class);
-        be.setItem(0, new ItemStack(net.minecraft.world.item.Items.IRON_INGOT, 1));
+        be.setItem(0, new ItemStack(net.minecraft.world.item.Items.IRON_INGOT, 2));
         be.setItem(1, new ItemStack(net.minecraft.world.item.Items.COAL, 8));
         be.setItem(3, new ItemStack(net.minecraft.world.item.Items.COAL, 2));
         runFurnaceTicks(helper, be, 5300);
@@ -732,12 +763,12 @@ public final class HearthwindPrimitiveGameTests {
         helper.setBlock(pos, net.minecraft.world.level.block.Blocks.BLAST_FURNACE);
         var be = helper.getBlockEntity(pos,
                 net.minecraft.world.level.block.entity.BlastFurnaceBlockEntity.class);
-        be.setItem(0, new ItemStack(net.minecraft.world.item.Items.IRON_INGOT, 1));
+        be.setItem(0, new ItemStack(net.minecraft.world.item.Items.IRON_INGOT, 2));
         be.setItem(1, new ItemStack(net.minecraft.world.item.Items.COAL, 2));
         runFurnaceTicks(helper, be, 5300);
         helper.assertTrue(be.getItem(2).isEmpty(),
                 "no steel may be produced without the extra-slot coal");
-        helper.assertTrue(be.getItem(0).getCount() == 1, "iron must remain untouched");
+        helper.assertTrue(be.getItem(0).getCount() == 2, "iron must remain untouched");
         helper.succeed();
     }
 
