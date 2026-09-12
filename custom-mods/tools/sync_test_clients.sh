@@ -33,19 +33,14 @@ for jar in $vendored $jars; do
 done
 echo "synced $count jars"
 
-# Prune stale versions: a dest jar that shares a synced jar's mod-id prefix
-# but has a different version would linger forever (sync only copies). The
-# loader picks one arbitrarily, so duplicates must go. Prefix = name minus
-# its trailing version token (e.g. geckolib-fabric-26.2-5.5.4 ->
-# geckolib-fabric-26.2, strawberrylib-fabric-26.2-r3 -> strawberrylib-fabric-26.2).
-for jar in $vendored $jars; do
-  name="$(basename "$jar" .jar)"
-  prefix="$(printf '%s' "$name" | sed -E 's/(-r[0-9]+|-[0-9][^-]*)$//')"
-  [ -n "$prefix" ] || continue
-  for dest in "${DESTS[@]}"; do
-    find "$dest" -maxdepth 1 -name "${prefix}-*.jar" ! -name "$name.jar" -exec rm -f {} \;
-  done
-done
+# Prune stale versions: a dest jar whose MOD ID matches a synced jar's mod id
+# but has a different filename is an old version and must go (the loader
+# picks one arbitrarily). Match by fabric.mod.json id, NEVER by filename
+# prefix: sibling mods share prefixes ("dungeons-and-taverns-5.3.2" vs
+# "dungeons-and-taverns-pillager-outpost-overhaul-v3.3", "chalk" vs
+# "chalk-colorful-addon") and prefix pruning ate them.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' $vendored $jars | python3 "$SCRIPT_DIR/prune_stale_jars.py" "${DESTS[@]}"
 
 # Guard: every deployed hearthwind jar must match the build output byte for
 # byte, so a stale copy can never silently win again.
