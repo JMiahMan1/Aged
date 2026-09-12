@@ -22,6 +22,10 @@ public final class JobRewards {
         if (player.getAbilities().instabuild) {
             return;
         }
+        if ((jobId.equals("smither") || jobId.equals("brewer"))
+                && AgeState.get(player) < 2) {
+            return;
+        }
         JobDefs.JobDef def = JobDefs.byId(jobId);
         if (def == null) {
             return;

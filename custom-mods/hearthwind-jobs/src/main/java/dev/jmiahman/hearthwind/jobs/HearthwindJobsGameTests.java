@@ -97,19 +97,43 @@ public final class HearthwindJobsGameTests {
     }
 
     @GameTest
-    public void smitherRewardsGrantedAtAnyAge(GameTestHelper helper) {
+    public void smitherJoinBlockedBelowAge2(GameTestHelper helper) {
+        JobDefs.ensureLoaded();
+        var player = helper.makeMockServerPlayerInLevel();
+        player.getAbilities().instabuild = false;
+        AgeState.set(player, 0);
+        helper.assertFalse(JobState.join(player, "smither"),
+                "smither join must fail at Age 0");
+        helper.assertFalse(JobState.join(player, "brewer"),
+                "brewer join must fail at Age 0");
+        AgeState.set(player, 2);
+        helper.assertTrue(JobState.join(player, "smither"),
+                "smither join must succeed at Age 2");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void smitherRewardsGatedBehindAge2(GameTestHelper helper) {
         JobDefs.ensureLoaded();
         var player = helper.makeMockServerPlayerInLevel();
         player.getInventory().clearContent();
         player.getAbilities().instabuild = false;
-        JobState.join(player, "smither");
+        AgeState.set(player, 0);
+        JobRewards.apply(player, "smither", 1);
+        int blocked = 0;
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            if (!player.getInventory().getItem(i).isEmpty()) blocked++;
+        }
+        helper.assertTrue(blocked == 0,
+                "smither level 1 rewards must be withheld at Age 0, got " + blocked + " items");
+        AgeState.set(player, 2);
         JobRewards.apply(player, "smither", 1);
         int after = 0;
         for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
             if (!player.getInventory().getItem(i).isEmpty()) after++;
         }
         helper.assertTrue(after > 0,
-                "smither level 1 rewards must be granted at any Age, got " + after + " items");
+                "smither level 1 rewards must be granted at Age 2, got " + after + " items");
         helper.succeed();
     }
 
