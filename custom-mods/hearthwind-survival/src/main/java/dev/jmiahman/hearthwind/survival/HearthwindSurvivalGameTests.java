@@ -29,70 +29,245 @@ public final class HearthwindSurvivalGameTests {
     public void configLoadsSaneDefaults(GameTestHelper helper) {
         HearthwindSurvivalConfig cfg = HearthwindSurvivalConfig.get();
         helper.assertTrue(cfg.thirst.baseDrainPerSecond > 0, "thirst drain must be positive");
-        helper.assertTrue(cfg.diet.deficiencyThreshold < cfg.diet.balanceThreshold,
-                "deficiency threshold must be below balance threshold");
+        helper.assertTrue(cfg.diet.negativeNutrition < cfg.diet.positiveNutrition,
+                "negative threshold must be below positive threshold");
         helper.assertTrue(cfg.spoilage.chancePerCheck >= 0, "spoil chance must not be negative");
         helper.succeed();
     }
 
     @GameTest
-    public void eatingBreadRefillsGrains(GameTestHelper helper) {
+    public void bareHandQuenchDefaultsToAgedValue(GameTestHelper helper) {
+        // Dehydration parity: water_source_quench = 1 on the 0..20 scale.
+        helper.assertTrue(HearthwindSurvivalConfig.get().bareHand.sipQuench == 1.0,
+                "sip quench must default to 1.0, got " + HearthwindSurvivalConfig.get().bareHand.sipQuench);
+        helper.assertTrue(HearthwindSurvivalConfig.get().bareHand.sipThirstChance == 0.5,
+                "sip thirst chance must default to the Aged override 0.5");
+        helper.assertTrue(HearthwindSurvivalConfig.get().bareHand.sipThirstDuration == 300,
+                "sip thirst duration must default to 300");
+        helper.succeed();
+    }
+
+    private ServerPlayer aimAtWater(GameTestHelper helper, net.minecraft.core.BlockPos water) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setShiftKeyDown(true);
+        player.getInventory().clearContent();
+        player.setPos(water.getX() + 0.5, water.getY() + 0.5, water.getZ() + 0.5);
+        return player;
+    }
+
+    @GameTest
+    public void bareHandRequiresSneak(GameTestHelper helper) {
+        net.minecraft.core.BlockPos water = new net.minecraft.core.BlockPos(1, 2, 1);
+        helper.setBlock(water, net.minecraft.world.level.block.Blocks.WATER);
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setShiftKeyDown(false);
+        HearthwindSurvivalThirst.setHydration(player, 10.0);
+        helper.assertTrue(BareHandDrinkHandler.trySip(player, helper.getLevel()) == net.minecraft.world.InteractionResult.PASS,
+                "standing (not sneaking) player must not sip");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void bareHandHoldCompletesSipAndConsumesSource(GameTestHelper helper) {
+        net.minecraft.core.BlockPos water = helper.absolutePos(new net.minecraft.core.BlockPos(1, 2, 1));
+        helper.setBlock(1, 2, 1, net.minecraft.world.level.block.Blocks.WATER);
+        ServerPlayer player = aimAtWater(helper, water);
+        HearthwindSurvivalThirst.setHydration(player, 10.0);
+        double before = HearthwindSurvivalThirst.hydration(player);
+        double chance = HearthwindSurvivalConfig.get().bareHand.sipThirstChance;
+        HearthwindSurvivalConfig.get().bareHand.sipThirstChance = 0.0;
+        try {
+            for (int i = 0; i < 30; i++) {
+                BareHandDrinkHandler.trySip(player, helper.getLevel());
+            }
+        } finally {
+            HearthwindSurvivalConfig.get().bareHand.sipThirstChance = chance;
+        }
+        helper.assertTrue(HearthwindSurvivalThirst.hydration(player) == before + 1.0,
+                "~21 sustained sips must complete one +1 quench drink");
+        helper.assertTrue(helper.getLevel().getBlockState(water).isAir(),
+                "still source must be consumed by default");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void bareHandFlowingWaterRefusedByDefault(GameTestHelper helper) {
+        helper.setBlock(1, 2, 1, net.minecraft.world.level.block.Blocks.WATER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.LEVEL, 1));
+        net.minecraft.core.BlockPos water = helper.absolutePos(new net.minecraft.core.BlockPos(1, 2, 1));
+        ServerPlayer player = aimAtWater(helper, water);
+        HearthwindSurvivalThirst.setHydration(player, 10.0);
+        for (int i = 0; i < 30; i++) {
+            helper.assertTrue(BareHandDrinkHandler.trySip(player, helper.getLevel()) == net.minecraft.world.InteractionResult.PASS,
+                    "flowing water must refuse sips by default");
+        }
+        helper.assertTrue(HearthwindSurvivalThirst.hydration(player) == 10.0, "no hydration from refused sips");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void purifiedWaterRegisters(GameTestHelper helper) {
+        helper.assertTrue(net.minecraft.core.registries.BuiltInRegistries.FLUID.containsKey(
+                net.minecraft.resources.Identifier.parse("dehydration:purified_water")), "purified fluid must exist");
+        helper.assertTrue(net.minecraft.core.registries.BuiltInRegistries.FLUID.containsKey(
+                net.minecraft.resources.Identifier.parse("dehydration:purified_flowing_water")), "purified flowing fluid must exist");
+        helper.assertTrue(net.minecraft.core.registries.BuiltInRegistries.BLOCK.containsKey(
+                net.minecraft.resources.Identifier.parse("dehydration:purified_water")), "purified water block must exist");
+        helper.assertTrue(net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(
+                net.minecraft.resources.Identifier.parse("dehydration:purified_water_bucket")), "purified bucket must exist");
+        var lookup = helper.getLevel().registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.FLUID);
+        var set = lookup.get(PurifiedWater.PURIFIED_TAG);
+        helper.assertTrue(set.isPresent() && set.get().size() >= 2, "purified fluid tag must list both fluids");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void purifiedBucketSmeltingRecipeParses(GameTestHelper helper) {
+        boolean found = false;
+        for (var holder : helper.getLevel().recipeAccess().getRecipes()) {
+            if (holder.id().identifier().equals(net.minecraft.resources.Identifier.parse("dehydration:purified_water_bucket"))) {
+                found = true;
+                break;
+            }
+        }
+        helper.assertTrue(found, "smelting a water bucket must yield a purified bucket (Dehydration parity)");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void purifiedSipNeverThirsts(GameTestHelper helper) {
+        net.minecraft.core.BlockPos water = helper.absolutePos(new net.minecraft.core.BlockPos(1, 2, 1));
+        helper.setBlock(1, 2, 1, PurifiedWater.BLOCK.defaultBlockState());
+        ServerPlayer player = aimAtWater(helper, water);
+        HearthwindSurvivalThirst.setHydration(player, 10.0);
+        double chance = HearthwindSurvivalConfig.get().bareHand.sipThirstChance;
+        HearthwindSurvivalConfig.get().bareHand.sipThirstChance = 1.0;
+        try {
+            for (int i = 0; i < 30; i++) {
+                BareHandDrinkHandler.trySip(player, helper.getLevel());
+            }
+        } finally {
+            HearthwindSurvivalConfig.get().bareHand.sipThirstChance = chance;
+        }
+        helper.assertTrue(HearthwindSurvivalThirst.hydration(player) > 10.0, "purified sip must hydrate");
+        helper.assertTrue(!player.hasEffect(ThirstMobEffect.HOLDER), "purified sip must never inflict thirst");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void sobrietyDefaultsToAlcoholFree(GameTestHelper helper) {
+        helper.assertTrue(HearthwindSurvivalConfig.get().sobriety.removeAlcohol,
+                "removeAlcohol must default to true");
+        helper.assertTrue(Sobriety.alcoholRemoved(),
+                "Sobriety helper must report alcohol removed by default");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void eatingAppleAddsVitaminsAndMinerals(GameTestHelper helper) {
         var pig = helper.spawn(EntityTypes.PIG, 1, 2, 1);
-        HearthwindSurvivalDiet.setLevel(pig, HearthwindSurvivalDiet.GRAINS, 0.0);
-        ItemStack bread = new ItemStack(Items.BREAD);
-        helper.assertTrue(bread.get(DataComponents.FOOD) != null, "bread must be food");
-        HearthwindSurvivalDiet.onEaten(pig, bread);
-        double grains = HearthwindSurvivalDiet.level(pig, HearthwindSurvivalDiet.GRAINS);
-        helper.assertTrue(grains > 0, "eating bread must refill grains");
-        helper.assertTrue(HearthwindSurvivalDiet.level(pig, HearthwindSurvivalDiet.PROTEINS)
-                == HearthwindSurvivalDiet.MAX_NUTRIENTS,
-                "unrelated groups must stay at default");
+        HearthwindSurvivalDiet.setLevel(pig, 3, 0);
+        HearthwindSurvivalDiet.setLevel(pig, 4, 0);
+        ItemStack apple = new ItemStack(Items.APPLE);
+        helper.assertTrue(apple.get(DataComponents.FOOD) != null, "apple must be food");
+        HearthwindSurvivalDiet.onEaten(pig, apple);
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(pig, 3) == 15,
+                "vanilla_items.json: apple must grant vitamins 15");
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(pig, 4) == 5,
+                "vanilla_items.json: apple must grant minerals 5");
         helper.succeed();
     }
 
     @GameTest
     public void eatHookFiresThroughItemUse(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
-        HearthwindSurvivalDiet.setLevel(player, HearthwindSurvivalDiet.GRAINS, 0.0);
-        ItemStack bread = new ItemStack(Items.BREAD);
-        HearthwindSurvivalDiet.onEaten(player, bread);
-        double grains = HearthwindSurvivalDiet.level(player, HearthwindSurvivalDiet.GRAINS);
-        helper.assertTrue(grains > 0, "eating bread via onEaten must refill grains (mixin hook)");
+        HearthwindSurvivalDiet.setLevel(player, 3, 0);
+        HearthwindSurvivalDiet.onEaten(player, new ItemStack(Items.APPLE));
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(player, 3) == 15,
+                "apple via onEaten must add vitamins (mixin hook)");
         helper.succeed();
     }
 
     @GameTest
     public void nonFoodDoesNotChangeDiet(GameTestHelper helper) {
         var pig = helper.spawn(EntityTypes.PIG, 1, 2, 1);
-        HearthwindSurvivalDiet.setLevel(pig, HearthwindSurvivalDiet.VEGETABLES, 10.0);
+        HearthwindSurvivalDiet.setLevel(pig, 0, 10);
         HearthwindSurvivalDiet.onEaten(pig, new ItemStack(Items.STICK));
-        helper.assertTrue(
-                HearthwindSurvivalDiet.level(pig, HearthwindSurvivalDiet.VEGETABLES) == 10.0,
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(pig, 0) == 10,
                 "sticks are not food; nutrients unchanged");
         helper.succeed();
     }
 
     @GameTest
-    public void decayReducesNutrients(GameTestHelper helper) {
-        var pig = helper.spawn(EntityTypes.PIG, 1, 2, 1);
-        HearthwindSurvivalDiet.setLevel(pig, HearthwindSurvivalDiet.FRUITS, 50.0);
-        var state = HearthwindSurvivalDiet.applyDecay(pig, HearthwindSurvivalConfig.get().diet);
-        double fruits = HearthwindSurvivalDiet.level(pig, HearthwindSurvivalDiet.FRUITS);
-        helper.assertTrue(fruits < 50.0 && fruits > 49.0,
-                "one decay step should reduce slightly: " + fruits);
-        helper.assertTrue(!state.allBalanced(), "50 in one group is not balanced overall");
-        helper.assertTrue(state.deficient() == 0, "nothing below deficiency yet");
+    public void decayReducesAllFiveNutrients(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        for (int i = 0; i < HearthwindSurvivalDiet.NUTRIENT_COUNT; i++) {
+            HearthwindSurvivalDiet.setLevel(player, i, 50);
+        }
+        HearthwindSurvivalDiet.applyDecay(player);
+        for (int i = 0; i < HearthwindSurvivalDiet.NUTRIENT_COUNT; i++) {
+            helper.assertTrue(HearthwindSurvivalDiet.getLevel(player, i) == 49,
+                    "hunger decay must drop every nutrient by 1 (index " + i + ")");
+        }
         helper.succeed();
     }
 
     @GameTest
-    public void decayFlagsDeficiency(GameTestHelper helper) {
-        var pig = helper.spawn(EntityTypes.PIG, 1, 2, 1);
-        for (var group : new net.minecraft.tags.TagKey[]{HearthwindSurvivalDiet.FRUITS}) {
-            HearthwindSurvivalDiet.setLevel(pig, group, 5.0);
+    public void decayNeverGoesBelowZero(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        HearthwindSurvivalDiet.setLevel(player, 0, 0);
+        HearthwindSurvivalDiet.applyDecay(player);
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(player, 0) == 0,
+                "nutrient decay must clamp at zero");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void nutrientsClampAtMax(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        HearthwindSurvivalDiet.setLevel(player, 0, 299);
+        HearthwindSurvivalDiet.addLevel(player, 0, 999);
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(player, 0)
+                == HearthwindSurvivalConfig.get().diet.maxNutrition,
+                "nutrients must clamp at maxNutrition");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void nutritionCorpusLoadsVanillaItems(GameTestHelper helper) {
+        helper.assertTrue(HearthwindSurvivalDiet.itemCount() >= 40,
+                "vanilla nutrition map must load (got " + HearthwindSurvivalDiet.itemCount() + ")");
+        int[] apple = HearthwindSurvivalDiet.nutritionOf(Items.APPLE);
+        helper.assertTrue(apple != null && apple[3] == 15 && apple[4] == 5,
+                "apple must map to vitamins 15 / minerals 5 from vanilla_items.json");
+        int[] cake = HearthwindSurvivalDiet.nutritionOf(Items.CAKE);
+        helper.assertTrue(cake != null, "vanilla_blocks.json (cake) must load");
+        int[] flask = HearthwindSurvivalDiet.nutritionOf(FlaskItems.LEATHER_FLASK);
+        helper.assertTrue(flask != null && flask[4] == 20,
+                "dehydration compat must map the flask to minerals 20");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void nutritionThresholdsApplyDatapackEffects(GameTestHelper helper) {
+        helper.assertTrue(NutritionEffects.negativeCount() > 0 && NutritionEffects.positiveCount() > 0,
+                "nutrition_manager/default.json must load positive and negative effect lists");
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(net.minecraft.world.level.GameType.SURVIVAL);
+        player.getAbilities().instabuild = false;
+        for (int i = 0; i < HearthwindSurvivalDiet.NUTRIENT_COUNT; i++) {
+            HearthwindSurvivalDiet.setLevel(player, i, 150);
         }
-        var state = HearthwindSurvivalDiet.applyDecay(pig, HearthwindSurvivalConfig.get().diet);
-        helper.assertTrue(state.deficient() > 0, "fruit at 5 must count as deficient");
+        // Low vitamins: default.json lists weakness on the negative side.
+        HearthwindSurvivalDiet.setLevel(player, 3, 0);
+        NutritionEffects.applyForTest(player);
+        helper.assertTrue(player.hasEffect(net.minecraft.world.effect.MobEffects.WEAKNESS),
+                "vitamins <= negativeNutrition must apply the datapack weakness effect");
+        // High vitamins: regeneration.
+        HearthwindSurvivalDiet.setLevel(player, 3, 300);
+        NutritionEffects.applyForTest(player);
+        helper.assertTrue(player.hasEffect(net.minecraft.world.effect.MobEffects.REGENERATION),
+                "vitamins >= positiveNutrition must apply the datapack regeneration effect");
         helper.succeed();
     }
 
@@ -275,59 +450,50 @@ public final class HearthwindSurvivalGameTests {
     }
 
     @GameTest
-    public void dietDeficiencyAppliesDebuffs(GameTestHelper helper) {
+    public void thresholdAttributeModifiersApplyAndClear(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
-        // Set all diet groups below deficiency threshold
-        for (var group : new net.minecraft.tags.TagKey[]{
-                HearthwindSurvivalDiet.FRUITS, HearthwindSurvivalDiet.VEGETABLES,
-                HearthwindSurvivalDiet.GRAINS, HearthwindSurvivalDiet.PROTEINS}) {
-            HearthwindSurvivalDiet.setLevel(player, group, 0.0);
+        player.setGameMode(net.minecraft.world.level.GameType.SURVIVAL);
+        player.getAbilities().instabuild = false;
+        for (int i = 0; i < HearthwindSurvivalDiet.NUTRIENT_COUNT; i++) {
+            HearthwindSurvivalDiet.setLevel(player, i, 150);
         }
-        HearthwindSurvivalConfig.Diet cfg = HearthwindSurvivalConfig.get().diet;
-        HearthwindSurvivalDiet.applyDecay(player, cfg);
-        // Deficiency debuffs should be applied on next tick (simulated via direct call)
-        helper.assertTrue(HearthwindSurvivalDiet.level(player, HearthwindSurvivalDiet.FRUITS)
-                < cfg.deficiencyThreshold, "fruit must be below deficiency");
+        HearthwindSurvivalDiet.setLevel(player, 0, 300);
+        NutritionEffects.applyForTest(player);
+        double boosted = player.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_SPEED);
+        HearthwindSurvivalDiet.setLevel(player, 0, 150);
+        NutritionEffects.applyForTest(player);
+        double cleared = player.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_SPEED);
+        helper.assertTrue(boosted > cleared,
+                "datapack attribute modifiers must apply at the positive threshold and clear in the normal band");
         helper.succeed();
     }
 
     @GameTest
-    public void dietBalancedGrantsAbsorption(GameTestHelper helper) {
+    public void temperatureStateRoundTripsAndClamps(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
-        // Set all groups to max
-        for (var group : new net.minecraft.tags.TagKey[]{
-                HearthwindSurvivalDiet.FRUITS, HearthwindSurvivalDiet.VEGETABLES,
-                HearthwindSurvivalDiet.GRAINS, HearthwindSurvivalDiet.PROTEINS,
-                HearthwindSurvivalDiet.SUGARS}) {
-            HearthwindSurvivalDiet.setLevel(player, group, 100.0);
-        }
-        HearthwindSurvivalConfig.Diet cfg = HearthwindSurvivalConfig.get().diet;
-        var state = HearthwindSurvivalDiet.applyDecay(player, cfg);
-        helper.assertTrue(state.allBalanced(), "all groups at max must be balanced");
+        helper.assertTrue(HearthwindSurvivalTemperature.body(player) == 0,
+                "fresh players start at body temperature 0");
+        HearthwindSurvivalTemperature.setBody(player, 2400);
+        helper.assertTrue(HearthwindSurvivalTemperature.body(player) == 2400,
+                "setBody must round-trip");
+        HearthwindSurvivalTemperature.setWetness(player, 180);
+        helper.assertTrue(HearthwindSurvivalTemperature.wetness(player) == 180,
+                "setWetness must round-trip (soaked band)");
         helper.succeed();
     }
 
     @GameTest
-    public void temperatureShiftAndClamp(GameTestHelper helper) {
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
-        double initial = HearthwindSurvivalTemperature.get(player);
-        double shifted = HearthwindSurvivalTemperature.shift(player, 5.0);
-        helper.assertTrue(shifted == initial + 5.0, "shift must add delta");
-        double clamped = HearthwindSurvivalTemperature.shift(player, 999.0);
-        helper.assertTrue(clamped == HearthwindSurvivalTemperature.MAX,
-                "temperature must clamp to max");
-        double coldClamped = HearthwindSurvivalTemperature.shift(player, -999.0);
-        helper.assertTrue(coldClamped == HearthwindSurvivalTemperature.MIN,
-                "temperature must clamp to min");
-        helper.succeed();
-    }
-
-    @GameTest
-    public void temperatureColdWaterCooldown(GameTestHelper helper) {
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
-        HearthwindSurvivalTemperature.applyColdCooldown(player, 100);
-        helper.assertTrue(HearthwindSurvivalTemperature.coldCooldownRemaining(player) > 0,
-                "cold cooldown must be active");
+    public void temperatureCutoffClampsAndAcclimatizes(GameTestHelper helper) {
+        helper.assertTrue(HearthwindSurvivalTemperature.applyCutoff(9_999, 2)
+                == EnvironmentCorpus.bodyTemperature(6),
+                "normal environments must clamp the body at +2400");
+        helper.assertTrue(HearthwindSurvivalTemperature.applyCutoff(-9_999, 2)
+                == EnvironmentCorpus.bodyTemperature(0),
+                "normal environments must clamp the body at -2400");
+        helper.assertTrue(HearthwindSurvivalTemperature.applyCutoff(300, 0) == 280,
+                "cold environments push a hot body down by twice the hot acclimatization (300 -> 280)");
+        helper.assertTrue(HearthwindSurvivalTemperature.applyCutoff(-300, 4) == -280,
+                "hot environments push a cold body up by twice the cold acclimatization (-300 -> -280)");
         helper.succeed();
     }
 
@@ -343,15 +509,14 @@ public final class HearthwindSurvivalGameTests {
     }
 
     @GameTest
-    public void dietOnEatenMatchesCorrectTag(GameTestHelper helper) {
-        var pig = helper.spawn(EntityTypes.PIG, 1, 2, 1);
-        HearthwindSurvivalDiet.setLevel(pig, HearthwindSurvivalDiet.FRUITS, 0.0);
-        // Apple is tagged as fruit in the migrated datapack
-        var apple = new ItemStack(Items.APPLE);
-        HearthwindSurvivalDiet.onEaten(pig, apple);
-        double fruits = HearthwindSurvivalDiet.level(pig, HearthwindSurvivalDiet.FRUITS);
-        // Even if apple isn't tagged, it shouldn't crash and fruits should be 0 or > 0
-        helper.assertTrue(fruits >= 0.0, "fruit level must be non-negative after eating apple");
+    public void drinkingFlaskAddsMinerals(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        HearthwindSurvivalDiet.setLevel(player, 4, 0);
+        ItemStack flask = new ItemStack(FlaskItems.LEATHER_FLASK);
+        FlaskItems.setFill(flask, 2, FlaskData.PURIFIED);
+        FlaskItems.onFlaskConsumed(player, flask);
+        helper.assertTrue(HearthwindSurvivalDiet.getLevel(player, 4) == 20,
+                "dehydration compat: a flask drink must add minerals 20 through the drink hook");
         helper.succeed();
     }
 
@@ -361,9 +526,28 @@ public final class HearthwindSurvivalGameTests {
         helper.assertTrue(cfg.thirst.baseDrainPerSecond > 0, "thirst drain positive");
         helper.assertTrue(cfg.thirst.regenHydrationFloor >= 0, "regen floor non-negative");
         helper.assertTrue(cfg.thirst.damageAmount > 0, "thirst damage positive");
-        helper.assertTrue(cfg.temperature.driftPerSecond > 0, "temp drift positive");
-        helper.assertTrue(cfg.diet.decayPerSecond > 0, "diet decay positive");
-        helper.assertTrue(cfg.diet.nutrientsPerFoodPoint > 0, "nutrients per point positive");
+        helper.assertTrue(cfg.temperature.temperatureCalculationTime == 10,
+                "Aged override temperatureCalculationTime must be 10");
+        helper.assertTrue(cfg.temperature.heatBlockRadius == 3, "heatBlockRadius must default to 3");
+        helper.assertTrue(cfg.temperature.easyWorldSpawn, "easyWorldSpawn must default to true");
+        helper.assertTrue(cfg.temperature.showThermometer, "showThermometer must default to true");
+        helper.assertTrue(cfg.temperature.overheatingExhaustion == 0.07F,
+                "Aged override overheatingExhaustion must be 0.07");
+        helper.assertTrue(cfg.temperature.exhaustionInsteadDehydration,
+                "in-house thirst uses the exhaustion path by default");
+        helper.assertTrue(cfg.temperature.thermometerIconX == -95,
+                "Aged override thermometerIconX must be -95");
+        helper.assertTrue(cfg.temperature.iconX == 7 && cfg.temperature.iconY == 52,
+                "body icon offsets must default to 7/52");
+        helper.assertTrue(cfg.temperature.thermometerIconY == 32,
+                "thermometer Y offset must default to 32");
+        helper.assertTrue(cfg.diet.maxNutrition == 300, "maxNutrition default must be 300");
+        helper.assertTrue(cfg.diet.negativeNutrition == 30, "negativeNutrition default must be 30");
+        helper.assertTrue(cfg.diet.positiveNutrition == 270, "positiveNutrition default must be 270");
+        helper.assertTrue("farm_and_charm:lettuce".equals(cfg.diet.vitaminItemId),
+                "Aged override vitaminItemId must be farm_and_charm:lettuce");
+        helper.assertTrue("meadow:alpine_salt".equals(cfg.diet.mineralItemId),
+                "Aged override mineralItemId must be meadow:alpine_salt");
         helper.assertTrue(cfg.spoilage.chancePerCheck >= 0, "spoil chance non-negative");
         helper.succeed();
     }
@@ -377,13 +561,30 @@ public final class HearthwindSurvivalGameTests {
     }
 
     @GameTest
-    public void temperatureWarnHandlesFirstJoinNullState(GameTestHelper helper) {
+    public void temperatureEffectRowsProfileBodyBands(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
-        // Regression: a fresh player has no warning-state entry; the old
-        // `level == prevLevel` unboxing NPE-crashed the server on join.
-        HearthwindSurvivalTemperature.warn(player, 10.0);
-        HearthwindSurvivalTemperature.warn(player, 10.0);
-        HearthwindSurvivalTemperature.warn(player, -12.0);
+        // environmentz:warming (+8) only helps while cold (body < 0);
+        // environmentz:cooling (-8) only helps while hot (body > 0).
+        helper.assertTrue(EnvironmentzEffects.WARMING != null
+                && EnvironmentzEffects.COOLING != null
+                && EnvironmentzEffects.COMFORT != null,
+                "environmentz warming/cooling/comfort effects must register");
+        player.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+                EnvironmentzEffects.WARMING, 200, 0));
+        HearthwindSurvivalTemperature.setState(player,
+                HearthwindSurvivalTemperature.State.DEFAULT.withBody(-1000));
+        int coldWithWarming = HearthwindSurvivalTemperature.effectTemperature(
+                player, HearthwindSurvivalTemperature.getState(player),
+                new int[]{0, 0});
+        helper.assertTrue(coldWithWarming == 8,
+                "warming must add +8 while cold (got " + coldWithWarming + ")");
+        HearthwindSurvivalTemperature.setState(player,
+                HearthwindSurvivalTemperature.State.DEFAULT.withBody(1000));
+        int hotWithWarming = HearthwindSurvivalTemperature.effectTemperature(
+                player, HearthwindSurvivalTemperature.getState(player),
+                new int[]{0, 0});
+        helper.assertTrue(hotWithWarming == 0,
+                "warming must not add heat while already hot (got " + hotWithWarming + ")");
         helper.succeed();
     }
 
@@ -395,11 +596,11 @@ public final class HearthwindSurvivalGameTests {
                 .lookupOrThrow(net.minecraft.core.registries.Registries.DAMAGE_TYPE);
         helper.assertTrue(registry.getOptional(HearthwindSurvivalThirst.DEHYDRATION).isPresent(),
                 "hearthwind:dehydration damage type must be registered (died of thirst)");
-        helper.assertTrue(registry.getOptional(HearthwindSurvivalTemperature.HEATSTROKE).isPresent(),
-                "hearthwind:heatstroke damage type must be registered (succumbed to the heat)");
+        helper.assertTrue(registry.getOptional(HearthwindSurvivalTemperature.FREEZING).isPresent(),
+                "environmentz:freezing damage type must be registered (froze to death)");
         var src = helper.getLevel().getServer().overworld().damageSources()
-                .source(HearthwindSurvivalThirst.DEHYDRATION);
-        helper.assertTrue(src != null, "dehydration DamageSource must resolve");
+                .source(HearthwindSurvivalTemperature.FREEZING);
+        helper.assertTrue(src != null, "freezing DamageSource must resolve");
         helper.succeed();
     }
 
@@ -428,7 +629,7 @@ public final class HearthwindSurvivalGameTests {
     @GameTest
     public void tempSyncPayloadRoundTrip(GameTestHelper helper) {
         var buf = bufFor(helper);
-        TempSyncPayload sent = new TempSyncPayload(-3.7f);
+        TempSyncPayload sent = new TempSyncPayload(-1800, 180, -6);
         TempSyncPayload.CODEC.encode(buf, sent);
         TempSyncPayload got = TempSyncPayload.CODEC.decode(buf);
         helper.assertTrue(got.equals(sent), "temp payload must round-trip: " + got);
@@ -439,12 +640,50 @@ public final class HearthwindSurvivalGameTests {
     @GameTest
     public void dietSyncPayloadRoundTrip(GameTestHelper helper) {
         var buf = bufFor(helper);
-        DietSyncPayload sent = new DietSyncPayload(new float[] {41.5f, 12.25f, 0.0f, -1.0f, 100.0f});
+        DietSyncPayload sent = new DietSyncPayload(300, 12, 0, 299, 150);
         DietSyncPayload.CODEC.encode(buf, sent);
         DietSyncPayload got = DietSyncPayload.CODEC.decode(buf);
-        helper.assertTrue(java.util.Arrays.equals(got.nutrients(), sent.nutrients()),
-                "diet payload must round-trip (float[] compare): " + java.util.Arrays.toString(got.nutrients()));
+        helper.assertTrue(got.equals(sent), "diet payload must round-trip: " + got);
         helper.assertTrue(!buf.isReadable(), "diet codec must be symmetric (no leftover bytes)");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void nutritionItemMapPayloadRoundTrip(GameTestHelper helper) {
+        var buf = bufFor(helper);
+        NutritionItemMapPayload sent = new NutritionItemMapPayload(java.util.List.of(
+                new NutritionItemMapPayload.Entry(
+                        net.minecraft.resources.Identifier.parse("minecraft:apple"), 0, 0, 0, 15, 5),
+                new NutritionItemMapPayload.Entry(
+                        net.minecraft.resources.Identifier.parse("dehydration:leather_flask"), 0, 0, 0, 0, 20)));
+        NutritionItemMapPayload.CODEC.encode(buf, sent);
+        NutritionItemMapPayload got = NutritionItemMapPayload.CODEC.decode(buf);
+        helper.assertTrue(got.entries().equals(sent.entries()),
+                "nutrition item map payload must round-trip: " + got);
+        helper.assertTrue(!buf.isReadable(), "item map codec must be symmetric (no leftover bytes)");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void nutritionEffectsPayloadRoundTrip(GameTestHelper helper) {
+        var buf = bufFor(helper);
+        java.util.List<java.util.List<String>> positive = java.util.List.of(
+                java.util.List.of("attribute.name.attack_speed"),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of("effect.minecraft.regeneration"),
+                java.util.List.of("effect.minecraft.haste"));
+        java.util.List<java.util.List<String>> negative = java.util.List.of(
+                java.util.List.of("attribute.name.attack_speed"),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of("effect.minecraft.weakness"),
+                java.util.List.of("effect.minecraft.unluck"));
+        NutritionEffectsPayload sent = new NutritionEffectsPayload(positive, negative);
+        NutritionEffectsPayload.CODEC.encode(buf, sent);
+        NutritionEffectsPayload got = NutritionEffectsPayload.CODEC.decode(buf);
+        helper.assertTrue(got.equals(sent), "nutrition effects payload must round-trip: " + got);
+        helper.assertTrue(!buf.isReadable(), "effects codec must be symmetric (no leftover bytes)");
         helper.succeed();
     }
 
@@ -507,9 +746,12 @@ public final class HearthwindSurvivalGameTests {
         HearthwindSurvivalThirst.setHydration(player, 10.0);
         double before = HearthwindSurvivalThirst.hydration(player);
 
-        // Simulate drink action
+        // Simulate sustained drinking (hold loop, ~21 use-events)
         var result = BareHandDrinkHandler.trySip(player, helper.getLevel());
         helper.assertTrue(result.consumesAction(), "Drinking while crouching on water must succeed");
+        for (int i = 0; i < 30; i++) {
+            BareHandDrinkHandler.trySip(player, helper.getLevel());
+        }
         double after = HearthwindSurvivalThirst.hydration(player);
         helper.assertTrue(after > before, "Hydration must increase after bare hand drink: " + after + " > " + before);
         helper.succeed();
@@ -588,12 +830,15 @@ public final class HearthwindSurvivalGameTests {
         helper.assertTrue(EnvironmentCorpus.blockCount() >= 10,
                 "heating/cooling block table must resolve vanilla entries (got "
                         + EnvironmentCorpus.blockCount() + ")");
-        helper.assertTrue(EnvironmentCorpus.itemCount() >= 1,
-                "carried item temperatures must load (got " + EnvironmentCorpus.itemCount() + ")");
+        helper.assertTrue(EnvironmentCorpus.itemCount() >= 20,
+                "carried item temperatures must load from the EnvironmentZ defaults (got "
+                        + EnvironmentCorpus.itemCount() + ")");
         helper.assertTrue(EnvironmentCorpus.tempFor(net.minecraft.world.level.block.Blocks.CAMPFIRE) != null,
                 "campfire must be a registered heat source");
         helper.assertTrue(EnvironmentCorpus.tempFor(net.minecraft.world.level.block.Blocks.ICE) != null,
                 "ice must be a registered cooling source");
+        helper.assertTrue(EnvironmentCorpus.tempFor(net.minecraft.world.level.block.Blocks.LAVA) != null,
+                "lava must be a registered heat source");
         helper.succeed();
     }
 
@@ -664,8 +909,18 @@ public final class HearthwindSurvivalGameTests {
         helper.setBlock(-1, 0, 0, fire);
         helper.setBlock(0, 0, 1, fire);
         int heat = EnvironmentCorpus.blockHeat(player);
-        // campfire max_count is 2; each is 1 block away (+2)
-        helper.assertTrue(heat == 4, "only max_count (2) campfires may contribute (got " + heat + ")");
+        // EnvironmentZ 2.0.8 campfire max_count is 3; each is 1 block away (+2)
+        helper.assertTrue(heat == 6, "only max_count (3) campfires may contribute (got " + heat + ")");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void lavaFluidWarmsAdjacentPlayer(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        parkPlayer(helper, player);
+        helper.setBlock(1, 0, 0, net.minecraft.world.level.block.Blocks.LAVA.defaultBlockState());
+        int heat = EnvironmentCorpus.blockHeat(player);
+        helper.assertTrue(heat == 3, "lava 1 block away must give +3 from the fluid table (got " + heat + ")");
         helper.succeed();
     }
 
@@ -674,20 +929,212 @@ public final class HearthwindSurvivalGameTests {
         EnvironmentCorpus.DimensionTable overworld = EnvironmentCorpus.dimension(
                 net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "overworld"));
         helper.assertTrue(overworld != null && !overworld.basic(), "overworld table must load");
-        helper.assertTrue(overworld.modifier("day", 0) == -4 && overworld.modifier("day", 4) == 4,
+        helper.assertTrue(overworld.day(0) == -4 && overworld.day(4) == 4,
                 "day row must be -4 (very cold) .. +4 (very hot)");
-        helper.assertTrue(overworld.modifier("night", 0) == -6, "night in a very cold biome must be -6");
-        helper.assertTrue(overworld.modifier("shadow", 2) == -1, "shadow must be -1");
-        helper.assertTrue(overworld.modifier("soaked", 2) == -6, "soaked must be -6");
+        helper.assertTrue(overworld.night(0) == -6 && overworld.night(4) == 2,
+                "night row must be -6 (very cold) .. +2 (very hot)");
+        helper.assertTrue(overworld.shadow(2) == -1, "shadow must be -1");
+        helper.assertTrue(overworld.soaked(2) == -6 && overworld.wett(2) == -3,
+                "soaked must be -6 and wett -3");
+        helper.assertTrue(overworld.sweat(0) == -2 && overworld.sweat(1) == -3,
+                "sweat must be -2 (hot) / -3 (very hot)");
+        helper.assertTrue(overworld.armor(2) == 1 && overworld.insulatedArmor(2) == 3
+                && overworld.icedArmor(2) == -5,
+                "armor rows must be +1 / +3 insulated / -5 iced");
         helper.assertTrue(overworld.hasHeight() && overworld.heightAt(200) == -2
-                && overworld.heightAt(64) == 1, "height rows must apply by altitude");
+                && overworld.heightAt(64) == 0 && overworld.heightAt(10) == 1
+                && overworld.heightAt(-5) == 2,
+                "height rows must apply by altitude (2/1/0/-1/-2 at y<0/0/30/120/190)");
+        helper.assertTrue(overworld.acclimatization() == EnvironmentCorpus.NO_DIMENSION_ACCLIMATIZATION,
+                "overworld uses the global acclimatization table");
         int[] bands = EnvironmentCorpus.thermometerBands();
-        helper.assertTrue(bands[0] == -6 && bands[1] == -2 && bands[2] == 2 && bands[3] == 6,
-                "thermometer bands must be -6/-2/2/6");
-        int[] acclimatization = EnvironmentCorpus.acclimatization();
+        helper.assertTrue(bands[0] == -6 && bands[1] == -3 && bands[2] == 3 && bands[3] == 6,
+                "thermometer bands must be -6/-3/3/6");
+        int[] acclimatization = EnvironmentCorpus.acclimatizationBands();
         helper.assertTrue(acclimatization.length == 8 && acclimatization[0] == 180
-                && acclimatization[1] == -10 && acclimatization[6] == -1680 && acclimatization[7] == 20,
-                "acclimatization table must match the corpus (180/-10, -1680/+20)");
+                && acclimatization[1] == -10 && acclimatization[2] == 1600
+                && acclimatization[3] == -15 && acclimatization[4] == -180
+                && acclimatization[5] == 10 && acclimatization[6] == -1600
+                && acclimatization[7] == 15,
+                "acclimatization table must be 180/-10, 1600/-15, -180/+10, -1600/+15");
+        EnvironmentCorpus.DimensionTable nether = EnvironmentCorpus.dimension(
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "the_nether"));
+        helper.assertTrue(nether != null && nether.basic() && nether.standard(2) == 5
+                && nether.acclimatization() == 0,
+                "nether must be a basic +5 dimension with acclimatization 0");
+        EnvironmentCorpus.DimensionTable end = EnvironmentCorpus.dimension(
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "the_end"));
+        helper.assertTrue(end != null && end.basic() && end.standard(2) == -5,
+                "end must be a basic -5 dimension");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void biomeAndBodyBandsMatchEnvironmentzDefaults(GameTestHelper helper) {
+        int[] body = EnvironmentCorpus.bodyTemperatures();
+        helper.assertTrue(body.length == 7 && body[0] == -2400 && body[2] == -240 && body[4] == 240
+                && body[6] == 2400,
+                "body bands must be -2400/-1800/-240/0/240/1800/2400");
+        helper.assertTrue(EnvironmentCorpus.biomeTemperature(0) == 0.2F
+                && EnvironmentCorpus.biomeTemperature(1) == 0.4F
+                && EnvironmentCorpus.biomeTemperature(2) == 1.2F
+                && EnvironmentCorpus.biomeTemperature(3) == 1.6F,
+                "biome thresholds must be 0.2/0.4/1.2/1.6");
+        helper.assertTrue(HearthwindSurvivalTemperature.environmentCode(0.1F) == 0
+                && HearthwindSurvivalTemperature.environmentCode(0.3F) == 1
+                && HearthwindSurvivalTemperature.environmentCode(1.0F) == 2
+                && HearthwindSurvivalTemperature.environmentCode(1.4F) == 3
+                && HearthwindSurvivalTemperature.environmentCode(1.7F) == 4,
+                "environmentCode must map the four biome thresholds");
+        helper.assertTrue(EnvironmentCorpus.wetness(0) == 200 && EnvironmentCorpus.wetness(1) == 180
+                && EnvironmentCorpus.wetness(2) == 100 && EnvironmentCorpus.wetness(3) == 1
+                && EnvironmentCorpus.wetness(4) == -1,
+                "wetness bands must be max 200/soaked 180/water +100/rain +1/dry -1");
+        helper.assertTrue(EnvironmentCorpus.protection(0) == 600
+                && EnvironmentCorpus.protection(1) == 600
+                && EnvironmentCorpus.protection(2) == 600
+                && EnvironmentCorpus.protection(3) == 600,
+                "protection pools must cap at 600");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void acclimatizationTableAdjustsBodyByBand(GameTestHelper helper) {
+        EnvironmentCorpus.DimensionTable overworld = EnvironmentCorpus.dimension(
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "overworld"));
+        helper.assertTrue(HearthwindSurvivalTemperature.acceptanceAdjustment(overworld, 2, 200) == -10,
+                "body above +180 in a normal biome must acclimatize -10");
+        helper.assertTrue(HearthwindSurvivalTemperature.acceptanceAdjustment(overworld, 2, -200) == 10,
+                "body below -180 in a normal biome must acclimatize +10");
+        helper.assertTrue(HearthwindSurvivalTemperature.acceptanceAdjustment(overworld, 1, -1700) == 15,
+                "very cold biomes push a very cold body +15");
+        helper.assertTrue(HearthwindSurvivalTemperature.acceptanceAdjustment(overworld, 3, 1700) == -15,
+                "hot biomes push an overheating body -15");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void itemTemperatureTablesMatchEnvironmentz(GameTestHelper helper) {
+        EnvironmentCorpus.ItemTemp stones = EnvironmentCorpus.item(EnvironmentzItems.HEATING_STONES);
+        helper.assertTrue(stones != null && stones.temperature() == 10 && stones.damage() == 1
+                && stones.coldProtection() == 2 && stones.heatProtection() == 0,
+                "heating stones must be +10 heat, 1 wear, cold_protection 2");
+        EnvironmentCorpus.ItemTemp pack = EnvironmentCorpus.item(EnvironmentzItems.ICE_PACK);
+        helper.assertTrue(pack != null && pack.temperature() == -10 && pack.damage() == 1
+                && pack.heatProtection() == 2 && pack.coldProtection() == 0,
+                "ice packs must be -10 heat, 1 wear, heat_protection 2");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void equippedTemperatureItemsAddHeatAndProtection(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.getInventory().clearContent();
+        player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                new ItemStack(EnvironmentzItems.HEATING_STONES));
+        player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND,
+                new ItemStack(EnvironmentzItems.HEATING_STONES));
+        int[] pools = {0, 0};
+        int total = HearthwindSurvivalTemperature.itemTemperature(player,
+                HearthwindSurvivalTemperature.getState(player), pools);
+        helper.assertTrue(total == 20, "two held heating stones must add +10 each (got " + total + ")");
+        helper.assertTrue(pools[1] == 4, "cold protection must accumulate 2+2 (got " + pools[1] + ")");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void protectionPoolsConsumeIncomingDelta(GameTestHelper helper) {
+        // Cold: resistance first, then cold protection, both decremented.
+        int[] pools = {0, 50};
+        int[] resistances = {0, 200};
+        int remaining = HearthwindSurvivalTemperature.consumeProtection(-100, 0, pools, resistances);
+        helper.assertTrue(remaining == 0, "cold resistance 200 must fully absorb -100 (got " + remaining + ")");
+        helper.assertTrue(resistances[1] == 100, "cold resistance must be consumed to 100");
+        helper.assertTrue(pools[1] == 50, "unused cold protection must remain");
+
+        // Heat: partial resistance passes the leftover through to heat protection.
+        pools = new int[]{30, 0};
+        resistances = new int[]{40, 0};
+        remaining = HearthwindSurvivalTemperature.consumeProtection(100, 4, pools, resistances);
+        helper.assertTrue(remaining == 30,
+                "40 heat resistance + 30 heat protection must leave 30 (got " + remaining + ")");
+        helper.assertTrue(resistances[0] == 0 && pools[0] == 0,
+                "both heat pools must be fully consumed at their limit");
+
+        // Full pool soak caps at the 600 pool.
+        pools = new int[]{600, 600};
+        resistances = new int[]{0, 0};
+        remaining = HearthwindSurvivalTemperature.consumeProtection(100, 4, pools, resistances);
+        helper.assertTrue(remaining == 0 && pools[0] == 500,
+                "600 heat protection must absorb 100 and leave 500 (got " + remaining + ")");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void armorTemperatureReadsInsulatedAndIcedNbt(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        EnvironmentCorpus.DimensionTable overworld = EnvironmentCorpus.dimension(
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "overworld"));
+
+        ItemStack insulated = new ItemStack(Items.LEATHER_CHESTPLATE);
+        net.minecraft.world.item.component.CustomData.update(
+                net.minecraft.core.component.DataComponents.CUSTOM_DATA, insulated,
+                tag -> tag.putString("environmentz", "fur_insolated"));
+        player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST, insulated);
+        helper.assertTrue(HearthwindSurvivalTemperature.armorTemperature(player, overworld, 2) == 3,
+                "insulated armor must use the +3 insulated_armor row");
+
+        ItemStack iced = new ItemStack(Items.CHAINMAIL_CHESTPLATE);
+        net.minecraft.world.item.component.CustomData.update(
+                net.minecraft.core.component.DataComponents.CUSTOM_DATA, iced,
+                tag -> tag.putInt("iced", 2));
+        player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST, iced);
+        helper.assertTrue(HearthwindSurvivalTemperature.armorTemperature(player, overworld, 2) == -5,
+                "iced armor must add the -5 iced_armor row");
+        net.minecraft.world.item.component.CustomData data =
+                iced.get(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+        helper.assertTrue(data != null && data.copyTag().getInt("iced").orElse(0) == 1,
+                "one calculation must consume one iced charge");
+        HearthwindSurvivalTemperature.armorTemperature(player, overworld, 2);
+        data = iced.get(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+        helper.assertTrue(data == null || !data.copyTag().contains("iced"),
+                "the last iced charge must clear the custom-data key");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void bandDebuffsApplyAndClear(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        net.minecraft.resources.Identifier freezing =
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("environmentz", "freezing_debuff");
+        net.minecraft.resources.Identifier cold =
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("environmentz", "cold_debuff");
+        net.minecraft.resources.Identifier general =
+                net.minecraft.resources.Identifier.fromNamespaceAndPath("environmentz", "general_debuff");
+        var speed = player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED);
+        var attackSpeed = player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_SPEED);
+        helper.assertTrue(speed != null && attackSpeed != null, "attribute instances must resolve");
+
+        HearthwindSurvivalTemperature.applyBandDebuffs(player, -2000);
+        helper.assertTrue(speed.hasModifier(freezing), "freezing must apply the -25% speed modifier");
+        helper.assertTrue(attackSpeed.hasModifier(general), "freezing must apply the -20% attack speed modifier");
+        HearthwindSurvivalTemperature.applyBandDebuffs(player, -1000);
+        helper.assertTrue(!speed.hasModifier(freezing) && speed.hasModifier(cold),
+                "the cold band must swap freezing for the -8% speed modifier");
+        helper.assertTrue(!attackSpeed.hasModifier(general), "general debuff must clear in the cold band");
+        HearthwindSurvivalTemperature.applyBandDebuffs(player, 100);
+        helper.assertTrue(!speed.hasModifier(cold), "comfortable bodies must clear the cold modifier");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void wetnessDriesByOnePerCalculation(GameTestHelper helper) {
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        HearthwindSurvivalTemperature.setWetness(player, 50);
+        int dried = HearthwindSurvivalTemperature.updateWetness(player, 50);
+        helper.assertTrue(dried == 49, "dry players must lose 1 wetness per calculation (got " + dried + ")");
+        helper.assertTrue(HearthwindSurvivalTemperature.updateWetness(player, 0) == 0,
+                "wetness must never go below 0");
         helper.succeed();
     }
 
@@ -701,50 +1148,54 @@ public final class HearthwindSurvivalGameTests {
     }
 
     @GameTest
-    public void temperatureTargetIncludesNearbyFire(GameTestHelper helper) {
+    public void fullCalculationHeatsFromNearbyCampfire(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
         parkPlayer(helper, player);
-        double cold = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, false, true, false, false);
+        HearthwindSurvivalTemperature.setState(player,
+                HearthwindSurvivalTemperature.State.DEFAULT.withBody(0));
+        HearthwindSurvivalTemperature.calculate(player);
+        int withoutFire = HearthwindSurvivalTemperature.body(player);
+
         helper.setBlock(1, 0, 0, net.minecraft.world.level.block.Blocks.CAMPFIRE.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.CampfireBlock.LIT, true));
-        double warm = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, false, true, false, false);
-        helper.assertTrue(Math.abs((warm - cold) - 2.0) < 0.001,
-                "a lit campfire must raise the temperature target by 2 (got delta " + (warm - cold) + ")");
+        HearthwindSurvivalTemperature.setState(player,
+                HearthwindSurvivalTemperature.State.DEFAULT.withBody(0));
+        HearthwindSurvivalTemperature.calculate(player);
+        int withFire = HearthwindSurvivalTemperature.body(player);
+        helper.assertTrue(withFire - withoutFire == 2,
+                "a lit campfire must add exactly +2 per calculation through the full pipeline (got delta "
+                        + (withFire - withoutFire) + ")");
         helper.succeed();
     }
 
     @GameTest
-    public void temperatureTargetIncludesNearbyIce(GameTestHelper helper) {
+    public void litCampfireUsesLitPropertyGate(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
         parkPlayer(helper, player);
-        double plain = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, false, true, false, false);
-        helper.setBlock(1, 0, 0, net.minecraft.world.level.block.Blocks.PACKED_ICE.defaultBlockState());
-        double chilled = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, false, true, false, false);
-        helper.assertTrue(Math.abs((chilled - plain) + 2.0) < 0.001,
-                "packed ice must lower the temperature target by 2 (got delta " + (chilled - plain) + ")");
+        helper.setBlock(1, 0, 0, net.minecraft.world.level.block.Blocks.CAMPFIRE.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.CampfireBlock.LIT, false));
+        int heat = EnvironmentCorpus.blockHeat(player, 3);
+        helper.assertTrue(heat == 0, "an unlit furnace/campfire must be gated by its lit property");
         helper.succeed();
     }
 
     @GameTest
-    public void temperatureModelUsesCorpusTablesByDefault(GameTestHelper helper) {
+    public void thermometerExcludesCarriedItemHeat(GameTestHelper helper) {
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
         parkPlayer(helper, player);
-        helper.assertTrue(HearthwindSurvivalConfig.get().temperature.useEnvironmentzTables,
-                "corpus tables must be enabled by default");
-        double day = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, false, true, false, false);
-        double night = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, true, true, false, false);
-        // In a temperate biome the corpus sets day and night to 0, so the
-        // meaningful assertion is that the delta always comes from the table.
-        int band = EnvironmentCorpus.band(player.level().getBiome(player.blockPosition()));
-        EnvironmentCorpus.DimensionTable overworld = EnvironmentCorpus.dimension(
-                net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "overworld"));
-        double expectedDelta = overworld.modifier("night", band) - overworld.modifier("day", band);
-        helper.assertTrue(Math.abs((night - day) - expectedDelta) < 0.001,
-                "the day/night delta must come from the corpus row (expected " + expectedDelta
-                        + ", got " + (night - day) + ")");
-        double sheltered = HearthwindSurvivalTemperature.environmentAdjustment(player, 0.0, 0.0, false, false, false, false);
-        helper.assertTrue(Math.abs((sheltered - day) + 1.0) < 0.001,
-                "being under a roof (shadow) must cost -1 (got " + (sheltered - day) + ")");
+        HearthwindSurvivalTemperature.setState(player,
+                HearthwindSurvivalTemperature.State.DEFAULT.withBody(0).withThermometer(0));
+        player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                new ItemStack(EnvironmentzItems.HEATING_STONES));
+        HearthwindSurvivalTemperature.calculate(player);
+        int body = HearthwindSurvivalTemperature.body(player);
+        int thermometer = HearthwindSurvivalTemperature.thermometer(player);
+        // The thermometer row deliberately excludes armor/item/effect/wetness
+        // drivers (reference thermometerCalculatingTemperature), so held heat
+        // shows on the body but not on the thermometer.
+        helper.assertTrue(body - thermometer == 10,
+                "carried heating stones must add +10 to the body only (body " + body
+                        + ", thermometer " + thermometer + ")");
         helper.succeed();
     }
 
@@ -801,6 +1252,17 @@ public final class HearthwindSurvivalGameTests {
         helper.assertTrue(granted == 0.0, "a stick must grant no hydration (got " + granted + ")");
         helper.assertTrue(Math.abs(HearthwindSurvivalThirst.hydration(player) - 8.0) < 0.001,
                 "hydration must be unchanged (got " + HearthwindSurvivalThirst.hydration(player) + ")");
+        helper.succeed();
+    }
+
+    @GameTest
+    public void seasonTempHookShiftsWithSeason(GameTestHelper helper) {
+        var cfg = dev.jmiahman.hearthwind.world.HearthwindWorldConfig.get();
+        double winter = dev.jmiahman.hearthwind.world.Season.WINTER.tempOffset(cfg);
+        double summer = dev.jmiahman.hearthwind.world.Season.SUMMER.tempOffset(cfg);
+        helper.assertTrue(winter < 0, "winter offset must cool (got " + winter + ")");
+        helper.assertTrue(summer > 0, "summer offset must warm (got " + summer + ")");
+        helper.assertTrue(winter < summer, "winter must be colder than summer");
         helper.succeed();
     }
 

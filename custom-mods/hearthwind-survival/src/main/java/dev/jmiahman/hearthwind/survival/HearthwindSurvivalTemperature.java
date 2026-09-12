@@ -5,352 +5,685 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
 
 import net.fabricmc.fabric.api.attachment.v1.AttachmentRegistry;
 import net.fabricmc.fabric.api.attachment.v1.AttachmentType;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.minecraft.core.Holder;
-import net.minecraft.network.chat.Component;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.tags.TagKey;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageType;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.item.Item;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.CustomData;
 
 /**
- * Temperature model replacing environmentz (parity-first):
- * body temperature drifts toward a biome-derived target; armor and carried
- * items from the migrated environmentz tags bias the drift; extremes cause
- * freezing damage / overheating exhaustion. Scale is -10..+10.
+ * Clean-room port of EnvironmentZ 2.0.8's server temperature model (the
+ * version Aged 3.1.2 ships; upstream Globox1997/EnvironmentZ
+ * temperature/TemperatureAspects + TemperatureManager, GPL-3.0 studied - no
+ * code copied). Behaviour and values mirror the original:
+ *
+ * <ul>
+ *   <li>body temperature is an integer in [-2400, 2400] with bands
+ *       -2400/-1800/-240/-0/+240/+1800/+2400;</li>
+ *   <li>wetness is an integer in [0, 200] (soaked at 180, water +100,
+ *       rain +1, drying -1);</li>
+ *   <li>all drivers run once per {@code temperatureCalculationTime + 1}
+ *       ticks per player: biome band, dimension standard or day/night,
+ *       wetness, shadow, sweat, armor (warm +3 / iced NBT), height,
+ *       nearby blocks/fluids with line of sight and max_count, equipped
+ *       items, status effects, acclimatization, protection pools;</li>
+ *   <li>resistance/protection pools (max 600) are consumed against the
+ *       incoming delta before it reaches the body;</li>
+ *   <li>band debuffs use transient attribute modifiers with stable ids:
+ *       cold -8% speed, freezing -25% speed / -20% attack speed, hot -12%
+ *       attack damage, overheating -30% attack damage / -20% attack
+ *       speed;</li>
+ *   <li>{@code <= -2400} deals 1.0 freezing damage, {@code >= 2400} adds
+ *       0.07 exhaustion (Aged's exhaustionInsteadDehydration path).</li>
+ * </ul>
  */
 public final class HearthwindSurvivalTemperature {
 
-    /** Data-driven heatstroke damage type (data/hearthwind/damage_type/heatstroke.json). */
-    public static final net.minecraft.resources.ResourceKey<net.minecraft.world.damagesource.DamageType> HEATSTROKE =
-            net.minecraft.resources.ResourceKey.create(
-                    net.minecraft.core.registries.Registries.DAMAGE_TYPE,
-                    Identifier.fromNamespaceAndPath("hearthwind", "heatstroke"));
+    /** Data-driven freezing damage type (data/environmentz/damage_type/freezing.json). */
+    public static final ResourceKey<DamageType> FREEZING = ResourceKey.create(
+            Registries.DAMAGE_TYPE,
+            Identifier.fromNamespaceAndPath("environmentz", "freezing"));
 
-    public static final double MIN = -10.0;
-    public static final double MAX = 10.0;
+    /** Persistent per-player state; mirrors TemperatureManager NBT. */
+    public record State(int body, int wetness, int thermometer,
+            int coldProtection, int heatProtection,
+            int coldResistance, int heatResistance,
+            boolean coldAffected, boolean hotAffected) {
 
-    public static final AttachmentType<Double> TEMPERATURE =
-            AttachmentRegistry.<Double>builder()
-                    .persistent(Codec.DOUBLE)
-                    .copyOnDeath()
-                    .buildAndRegister(
-                            Identifier.fromNamespaceAndPath("environmentz", "temperature"));
+        public static final State DEFAULT = new State(0, 0, 0, 0, 0, 0, 0, true, true);
 
-    // Per-player warning state to avoid cross-player contamination
-    private static final Map<UUID, Integer> warningLevels = new ConcurrentHashMap<>();
-    private static final Map<UUID, Long> freezeCooldowns = new ConcurrentHashMap<>();
-    private static final Map<UUID, Long> heatCooldowns = new ConcurrentHashMap<>();
-    private static final Map<UUID, Long> coldWaterCooldowns = new ConcurrentHashMap<>();
+        public static final Codec<State> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                Codec.INT.fieldOf("player_temperature").forGetter(State::body),
+                Codec.INT.fieldOf("player_wetness").forGetter(State::wetness),
+                Codec.INT.fieldOf("thermometer").forGetter(State::thermometer),
+                Codec.INT.fieldOf("cold_protection").forGetter(State::coldProtection),
+                Codec.INT.fieldOf("heat_protection").forGetter(State::heatProtection),
+                Codec.INT.fieldOf("cold_resistance").forGetter(State::coldResistance),
+                Codec.INT.fieldOf("heat_resistance").forGetter(State::heatResistance),
+                Codec.BOOL.fieldOf("cold_affected").forGetter(State::coldAffected),
+                Codec.BOOL.fieldOf("hot_affected").forGetter(State::hotAffected)
+        ).apply(instance, State::new));
+
+        public State withBody(int value) {
+            return new State(value, wetness, thermometer, coldProtection, heatProtection,
+                    coldResistance, heatResistance, coldAffected, hotAffected);
+        }
+
+        public State withWetness(int value) {
+            return new State(body, value, thermometer, coldProtection, heatProtection,
+                    coldResistance, heatResistance, coldAffected, hotAffected);
+        }
+
+        public State withThermometer(int value) {
+            return new State(body, wetness, value, coldProtection, heatProtection,
+                    coldResistance, heatResistance, coldAffected, hotAffected);
+        }
+    }
+
+    public static final AttachmentType<State> STATE = AttachmentRegistry.<State>builder()
+            .persistent(State.CODEC)
+            // EnvironmentZ's TemperatureManager does NOT copy on death
+            // (not a CopyableComponent): respawn resets to the neutral band.
+            // copyOnDeath here caused a respawn -> instant re-freeze loop.
+            .buildAndRegister(Identifier.fromNamespaceAndPath("environmentz", "temperature_state"));
+
+    private static final Identifier COLD_DEBUFF_ID = id("cold_debuff");
+    private static final Identifier FREEZING_DEBUFF_ID = id("freezing_debuff");
+    private static final Identifier HOT_DEBUFF_ID = id("hot_debuff");
+    private static final Identifier OVERHEATING_DEBUFF_ID = id("overheating_debuff");
+    private static final Identifier GENERAL_DEBUFF_ID = id("general_debuff");
+
+    private static final AttributeModifier COLD_DEBUFF =
+            new AttributeModifier(COLD_DEBUFF_ID, -0.08, AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
+    private static final AttributeModifier FREEZING_DEBUFF =
+            new AttributeModifier(FREEZING_DEBUFF_ID, -0.25, AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
+    private static final AttributeModifier HOT_DEBUFF =
+            new AttributeModifier(HOT_DEBUFF_ID, -0.12, AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
+    private static final AttributeModifier OVERHEATING_DEBUFF =
+            new AttributeModifier(OVERHEATING_DEBUFF_ID, -0.30, AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
+    private static final AttributeModifier GENERAL_DEBUFF =
+            new AttributeModifier(GENERAL_DEBUFF_ID, -0.20, AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
+
+    private static final EquipmentSlot[] ARMOR_SLOTS = {
+            EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET};
+    private static final EquipmentSlot[] EQUIPPED_SLOTS = {
+            EquipmentSlot.MAINHAND, EquipmentSlot.OFFHAND,
+            EquipmentSlot.FEET, EquipmentSlot.LEGS, EquipmentSlot.CHEST, EquipmentSlot.HEAD};
+
+    private static final Map<UUID, Integer> TICKERS = new ConcurrentHashMap<>();
 
     private HearthwindSurvivalTemperature() {}
 
-    public static double get(ServerPlayer player) {
-        Double v = player.getAttached(TEMPERATURE);
-        return v == null ? 0.0 : v;
+    private static Identifier id(String path) {
+        return Identifier.fromNamespaceAndPath("environmentz", path);
     }
 
-    /** Apply an external delta (items); returns the new temperature. */
-    public static double shift(ServerPlayer player, double delta) {
-        double next = clamp(get(player) + delta);
-        player.setAttached(TEMPERATURE, next);
-        return next;
+    // ---- state access --------------------------------------------------
+    public static State getState(net.minecraft.world.entity.Entity entity) {
+        State state = entity.getAttached(STATE);
+        return state == null ? State.DEFAULT : state;
     }
 
-    /** Drinking cold/normal water gives a timed cooling window vs overheating. */
-    public static void applyColdCooldown(ServerPlayer player, long ticks) {
-        long until = player.level().getGameTime() + ticks;
-        coldWaterCooldowns.put(player.getUUID(), until);
-        // also nudge now for immediate feedback
-        shift(player, -0.5);
+    public static void setState(net.minecraft.world.entity.Entity entity, State state) {
+        entity.setAttached(STATE, state);
     }
 
-    public static long coldCooldownRemaining(ServerPlayer player) {
-        long until = coldWaterCooldowns.getOrDefault(player.getUUID(), 0L);
-        long now = player.level().getGameTime();
-        return Math.max(0, until - now);
+    public static int body(net.minecraft.world.entity.Entity entity) {
+        return getState(entity).body();
     }
 
-    public static void sendFeedback(ServerPlayer player, double newTemp) {
-        player.sendSystemMessage(Component.literal(String.format(
-                "You feel %s (%.1f)", newTemp < 0 ? "cooler" : "warmer", newTemp)));
+    public static int wetness(net.minecraft.world.entity.Entity entity) {
+        return getState(entity).wetness();
     }
 
-    private static double clamp(double v) {
-        return Math.max(MIN, Math.min(MAX, v));
+    public static int thermometer(net.minecraft.world.entity.Entity entity) {
+        return getState(entity).thermometer();
     }
 
-    private static int countTag(ItemStack[] stacks, TagKey<Item> tag) {
-        int n = 0;
-        for (ItemStack s : stacks) {
-            if (!s.isEmpty() && s.is(tag)) {
-                n++;
-            }
+    public static void setBody(net.minecraft.world.entity.Entity entity, int value) {
+        setState(entity, getState(entity).withBody(value));
+    }
+
+    public static void setWetness(net.minecraft.world.entity.Entity entity, int value) {
+        setState(entity, getState(entity).withWetness(value));
+    }
+
+    public static void setThermometer(net.minecraft.world.entity.Entity entity, int value) {
+        setState(entity, getState(entity).withThermometer(value));
+    }
+
+    /** /environment affection parity: zero out unwanted hot/cold body changes. */
+    public static void setEnvironmentAffection(ServerPlayer player, boolean hotAffected, boolean coldAffected) {
+        State state = getState(player);
+        setState(player, new State(state.body(), state.wetness(), state.thermometer(),
+                state.coldProtection(), state.heatProtection(),
+                state.coldResistance(), state.heatResistance(), coldAffected, hotAffected));
+    }
+
+    public static void setProtection(ServerPlayer player, boolean heat, int amount) {
+        State s = getState(player);
+        if (heat) {
+            setState(player, new State(s.body(), s.wetness(), s.thermometer(),
+                    s.coldProtection(), amount, s.coldResistance(), s.heatResistance(),
+                    s.coldAffected(), s.hotAffected()));
+        } else {
+            setState(player, new State(s.body(), s.wetness(), s.thermometer(),
+                    amount, s.heatProtection(), s.coldResistance(), s.heatResistance(),
+                    s.coldAffected(), s.hotAffected()));
         }
-        return n;
     }
 
-    /** Biome-derived equilibrium temperature on the -10..10 scale. */
-    static double targetFor(ServerPlayer player) {
-        Holder<net.minecraft.world.level.biome.Biome> biome =
-                player.level().getBiome(player.blockPosition());
-        float base = biome.value().getBaseTemperature();
-        // vanilla range ~[-0.7 .. 2.0]: plains .8, desert 2.0, snowy taiga -.5,
-        // frozen peaks -.7 -> map to [-9..+9]
-        double t = (base - 0.6) * 6.5;
-        double seasonal = dev.jmiahman.hearthwind.world.HearthwindWorld.currentSeason(
-                player.level()).tempOffset(dev.jmiahman.hearthwind.world.HearthwindWorldConfig.get());
-        return Math.max(-9.0, Math.min(9.0, t + seasonal));
+    public static void setResistance(ServerPlayer player, boolean heat, int amount) {
+        State s = getState(player);
+        if (heat) {
+            setState(player, new State(s.body(), s.wetness(), s.thermometer(),
+                    s.coldProtection(), s.heatProtection(), s.coldResistance(), amount,
+                    s.coldAffected(), s.hotAffected()));
+        } else {
+            setState(player, new State(s.body(), s.wetness(), s.thermometer(),
+                    s.coldProtection(), s.heatProtection(), amount, s.heatResistance(),
+                    s.coldAffected(), s.hotAffected()));
+        }
     }
 
+    // ---- loop ----------------------------------------------------------
     public static void registerTickLoop() {
-        ServerTickEvents.END_SERVER_TICK.register(server -> {
-            if (server.getTickCount() % 40 != 0) {
-                return; // once per second
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            ServerPlayer player = handler.getPlayer();
+            HearthwindSurvivalConfig.Temperature cfg = HearthwindSurvivalConfig.get().temperature;
+            // Reference PlayerManager behaviour: first-time players get a
+            // startup comfort effect (we use the absent attachment as the
+            // "no player NBT" proxy).
+            if (player.getAttached(STATE) == null && !player.isCreative()
+                    && cfg.startUpComfortEffectDuration > 0) {
+                player.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+                        EnvironmentzEffects.COMFORT, cfg.startUpComfortEffectDuration,
+                        0, false, false, true));
             }
+            sync(player, getState(player));
+        });
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+                TICKERS.remove(handler.getPlayer().getUUID()));
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                DamageSource generic = player.damageSources().generic();
-                if (player.isInvulnerableTo(player.level(), generic)
-                        || player.getAbilities().instabuild) {
-                    continue;
-                }
-                tick(player);
+                tickPlayer(player);
             }
         });
     }
 
-    private static void tick(ServerPlayer player) {
-        double target = targetFor(player);
-        double current = get(player);
-
-        // inventory insulation / ice bias toward comfort
-        boolean hasInsulation = player.getInventory().hasAnyMatching(
-                s -> !s.isEmpty() && s.is(EnvironmentzItems.INSOLATING_ITEM));
-        boolean hasIce = player.getInventory().hasAnyMatching(
-                s -> !s.isEmpty() && s.is(EnvironmentzItems.ICE_ITEMS));
-        // cold-water drunk cooldown - extra -1.5 target dampening for 30-60s
-        // (normal water 30s, cold 60s). Hot water does NOT grant this.
-        Long coldUntil = coldWaterCooldowns.get(player.getUUID());
-        if (coldUntil != null) {
-            if (player.level().getGameTime() < coldUntil) {
-                target -= 1.5;
-            } else {
-                coldWaterCooldowns.remove(player.getUUID());
-            }
+    /** Reference TemperatureManager#tick: every temperatureCalculationTime + 1 ticks. */
+    static void tickPlayer(ServerPlayer player) {
+        if (player.isCreative() || player.isSpectator() || !player.isAlive()) {
+            return;
         }
-        // sprinting builds heat quickly
-        if (player.isSprinting()) {
-            target += 1.8;
+        int period = Math.max(0, HearthwindSurvivalConfig.get().temperature.temperatureCalculationTime);
+        int ticks = TICKERS.merge(player.getUUID(), 1, Integer::sum);
+        if (ticks <= period) {
+            return;
         }
+        TICKERS.put(player.getUUID(), 0);
+        calculate(player);
+    }
 
-        // day/night - heat much less at night, cold much worse at night (when outside)
-        long timeOfDay = player.level().getGameTime() % 24000L;
-        boolean isNight = timeOfDay > 13000 && timeOfDay < 23000;
-        boolean isOutside = player.level().canSeeSky(player.blockPosition());
-
-        target = environmentAdjustment(player, current, target, isNight, isOutside,
-                hasInsulation, hasIce);
-
-        // environmental modifiers
-        if (player.isOnFire()) {
-            target = Math.max(target, 9.5);
-        }
-        if (player.isInWater()) {
-            // In water, temperature quickly moves toward water-cold.
-            // For heat, this is a reset (cools you); for cold, it makes it worse (even colder when wet at night outside).
-            target -= 2.0; // water always chills
-            if (target > 0) {
-                // was hot, water resets strongly to cool
-                target = Math.min(target, -1.0);
-            }
-            // also clear heat-era cooldowns so you don't immediately reburn on exit
-            heatCooldowns.remove(player.getUUID());
-            // if was overheated, give a brief cooled window after exit
-            if (current >= 7.0) {
-                applyColdCooldown(player, 200); // 10s extra after water exit
-            }
-            // if was already freezing, water makes it worse - accelerate freeze
-            if (current <= -6.0) {
-                target -= 1.5; // extra chill when already cold and wet
-            }
-        } else if (player.level().isRainingAt(player.blockPosition())) {
-            // Rain cools heat and gives relief - stronger than before
-            target -= 2.0;
-            if (isNight && isOutside) target -= 1.0; // rain + night outside is extra cold
-            // rain when cold and outside also worsens (wet cold)
-            if (current <= -6.0 && isOutside) target -= 1.0;
-            else if (current >= 6.0) {
-                // rain relief for heat - brief cooled window like drinking water
-                applyColdCooldown(player, 100); // 5s relief
-            }
-        }
-        // water reset: if just exited water, keep target low for a bit via cold cooldown
-        // (already applied above)
-
-        // drift is per-second, tick is 40 ticks = 2s
+    /** One full reference calculation. Package-private for gametests. */
+    static State calculate(ServerPlayer player) {
         HearthwindSurvivalConfig.Temperature cfg = HearthwindSurvivalConfig.get().temperature;
-        target = Math.max(-9.0, Math.min(9.0, target));
-        double seconds = 40 / 20.0;
-        double perTickDrift = cfg.driftPerSecond * seconds;
-        double next;
-        if (player.isInWater()) {
-            // In water, heat is quickly washed away - reset to water target
-            next = clamp(target);
+        State old = getState(player);
+
+        int calc = 0;
+        int thermo = 0;
+
+        int wet = updateWetness(player, old.wetness());
+        boolean isSoaked = wet >= EnvironmentCorpus.wetness(1);
+        boolean isInShadow = !player.level().canSeeSky(player.blockPosition().above());
+        float biomeTemperature = player.level().getBiome(player.blockPosition()).value().getBaseTemperature();
+
+        Identifier dimensionId = player.level().dimension().identifier();
+        if (EnvironmentCorpus.shouldUseOverworldTemperatures(dimensionId)) {
+            dimensionId = EnvironmentCorpus.OVERWORLD;
+        }
+        EnvironmentCorpus.DimensionTable dimension = EnvironmentCorpus.dimension(dimensionId);
+        if (dimension == null) {
+            dimension = EnvironmentCorpus.dimension(EnvironmentCorpus.OVERWORLD);
+        }
+        int environmentCode = environmentCode(biomeTemperature);
+
+        // standard OR day/night row
+        int rowValue;
+        if (EnvironmentCorpus.shouldUseStandardTemperatures(dimensionId)) {
+            rowValue = dimension.standard(environmentCode);
         } else {
-            double step = Math.signum(target - current)
-                    * Math.min(perTickDrift, Math.abs(target - current));
-            next = clamp(current + step);
+            rowValue = player.level().isBrightOutside()
+                    ? dimension.day(environmentCode)
+                    : dimension.night(environmentCode);
         }
-        player.setAttached(TEMPERATURE, next);
+        calc += rowValue;
+        thermo += rowValue;
 
-        long now = player.level().getGameTime();
-        long cooldownTicks = (long) (cfg.hurtCooldownSeconds * 20);
-        if (next <= cfg.freezeHurtAt && cooldown(freezeCooldowns, player.getUUID(), now, cooldownTicks)) {
-            player.hurt(player.damageSources().freeze(), 1.0f);
-        }
-        if (next >= cfg.heatExhaustAt) {
-            player.getFoodData().addExhaustion(0.02f);
-        }
-        if (next >= cfg.heatHurtAt && cooldown(heatCooldowns, player.getUUID(), now, cooldownTicks)) {
-            player.hurt(player.damageSources().source(HEATSTROKE), 1.0f);
+        // Season climate hook (seasons-lite): the world's seasonal offset
+        // shifts both body drift and the thermometer reading.
+        try {
+            dev.jmiahman.hearthwind.world.Season season =
+                    dev.jmiahman.hearthwind.world.Season.fromWorldTime(
+                            player.level().getGameTime(),
+                            dev.jmiahman.hearthwind.world.HearthwindWorldConfig.get().daysPerSeason);
+            int seasonOff = (int) Math.round(season.tempOffset(
+                    dev.jmiahman.hearthwind.world.HearthwindWorldConfig.get()));
+            calc += seasonOff;
+            thermo += seasonOff;
+        } catch (Exception ignored) {
         }
 
-        warn(player, next);
+        // wetness row
+        if (wet > 0) {
+            calc += isSoaked ? dimension.soaked(environmentCode) : dimension.wett(environmentCode);
+        }
+
+        // shadow
+        if (isInShadow) {
+            int shadow = dimension.shadow(environmentCode);
+            calc += shadow;
+            thermo += shadow;
+        }
+
+        // sweat
+        if (environmentCode > 2) {
+            if (cfg.exhaustionInsteadDehydration) {
+                if (player.getFoodData().getFoodLevel() > 6) {
+                    player.getFoodData().addExhaustion(cfg.overheatingExhaustion);
+                    calc += dimension.sweat(environmentCode - 3);
+                }
+            } else if (HearthwindSurvivalThirst.hydration(player) > 6.0) {
+                HearthwindSurvivalThirst.addHydration(player, -cfg.overheatingExhaustion);
+                calc += dimension.sweat(environmentCode - 3);
+            }
+        }
+
+        // armor (warm insulation / iced NBT)
+        calc += armorTemperature(player, dimension, environmentCode);
+
+        // height
+        int height = dimension.heightAt(player.blockPosition().getY());
+        calc += height;
+        thermo += height;
+
+        // nearby blocks and fluids
+        int blocks = EnvironmentCorpus.blockHeat(player, cfg.heatBlockRadius);
+        calc += blocks;
+        thermo += blocks;
+
+        // protection pools (index 0 heat, 1 cold)
+        int[] pools = {old.heatProtection(), old.coldProtection()};
+
+        // equipped items
+        calc += itemTemperature(player, old, pools);
+
+        // status effects
+        calc += effectTemperature(player, old, pools);
+
+        // acclimatization
+        int acclimatization = acceptanceAdjustment(dimension, environmentCode, old.body());
+        calc += acclimatization;
+
+        // resistance then protection, consumed against the incoming delta
+        int[] resistances = {old.heatResistance(), old.coldResistance()};
+        calc = consumeProtection(calc, environmentCode, pools, resistances);
+        int heatResistance = resistances[0];
+        int coldResistance = resistances[1];
+
+        // new body temperature + cutoff / strong acclimatization
+        int body = applyCutoff(old.body() + calc, environmentCode);
+
+        // environment affection flags
+        if (!old.coldAffected() && body < 0) {
+            body = 0;
+        }
+        if (!old.hotAffected() && body > 0) {
+            body = 0;
+        }
+
+        // band debuffs
+        if (body != 0 && body % 2 == 0) {
+            applyBandDebuffs(player, body);
+        }
+
+        // damage / exhaustion
+        if (body <= EnvironmentCorpus.bodyTemperature(0)) {
+            player.hurt(createFreezingSource(player), 1.0F);
+        } else if (body >= EnvironmentCorpus.bodyTemperature(6)) {
+            if (cfg.exhaustionInsteadDehydration) {
+                player.getFoodData().addExhaustion(cfg.overheatingExhaustion);
+            } else {
+                HearthwindSurvivalThirst.addHydration(player, -cfg.overheatingExhaustion);
+            }
+        }
+
+        State next = new State(body, wet, thermo, pools[1], pools[0],
+                coldResistance, heatResistance, old.coldAffected(), old.hotAffected());
+        setState(player, next);
+        if (next.body() != old.body() || next.wetness() != old.wetness()
+                || next.thermometer() != old.thermometer()) {
+            sync(player, next);
+        }
+        return next;
+    }
+
+    /** Reference environmentCode 0 very_cold .. 4 very_hot. */
+    static int environmentCode(float biomeTemperature) {
+        if (biomeTemperature < EnvironmentCorpus.biomeTemperature(1)) {
+            return biomeTemperature < EnvironmentCorpus.biomeTemperature(0) ? 0 : 1;
+        }
+        if (biomeTemperature > EnvironmentCorpus.biomeTemperature(2)) {
+            return biomeTemperature > EnvironmentCorpus.biomeTemperature(3) ? 4 : 3;
+        }
+        return 2;
+    }
+
+    static void sync(ServerPlayer player, State state) {
+        try {
+            ServerPlayNetworking.send(player,
+                    new TempSyncPayload(state.body(), state.wetness(), state.thermometer()));
+        } catch (Exception ignored) {
+            // client without hearthwind-client simply does not receive the payload
+        }
+    }
+
+    // ---- drivers -------------------------------------------------------
+    /** Reference playerWetness: water/rain add, dry subtract once per calculation. */
+    static int updateWetness(ServerPlayer player, int wetness) {
+        int max = EnvironmentCorpus.wetness(0);
+        if (player.isInWaterOrRain()) {
+            if (wetness < max) {
+                if (player.isInWater()) {
+                    wetness += EnvironmentCorpus.wetness(2);
+                } else if (player.level().isRainingAt(player.blockPosition())) {
+                    wetness += EnvironmentCorpus.wetness(3);
+                }
+            }
+        } else if (wetness > 0) {
+            wetness += EnvironmentCorpus.wetness(4);
+        }
+        return Math.max(0, Math.min(max, wetness));
+    }
+
+    static int armorTemperature(ServerPlayer player, EnvironmentCorpus.DimensionTable dimension, int environmentCode) {
+        int total = 0;
+        for (EquipmentSlot slot : ARMOR_SLOTS) {
+            ItemStack stack = player.getItemBySlot(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            CompoundTag tag = customTag(stack);
+            boolean insulated = (tag != null && tag.contains("environmentz"))
+                    || stack.is(EnvironmentzItems.WARM_ARMOR);
+            if (!stack.is(EnvironmentzItems.NON_AFFECTING_ARMOR)) {
+                total += insulated ? dimension.insulatedArmor(environmentCode) : dimension.armor(environmentCode);
+            }
+            if (tag != null && tag.contains("iced") && !stack.is(EnvironmentzItems.WARM_ARMOR)) {
+                total += dimension.icedArmor(environmentCode);
+                int iced = tag.getInt("iced").orElse(1) - 1;
+                CustomData.update(DataComponents.CUSTOM_DATA, stack, updated -> {
+                    if (iced <= 0) {
+                        updated.remove("iced");
+                    } else {
+                        updated.putInt("iced", iced);
+                    }
+                });
+            }
+        }
+        return total;
+    }
+
+    static int itemTemperature(ServerPlayer player, State state, int[] pools) {
+        int total = 0;
+        for (EquipmentSlot slot : EQUIPPED_SLOTS) {
+            ItemStack stack = player.getItemBySlot(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            EnvironmentCorpus.ItemTemp item = EnvironmentCorpus.item(stack.getItem());
+            if (item == null) {
+                continue;
+            }
+            if (item.damage() != 0 && stack.isDamageableItem() && !isArmor(stack)) {
+                if (stack.getMaxDamage() - stack.getDamageValue() > 1) {
+                    if (!player.isCreative()) {
+                        int damage = item.damage();
+                        if (stack.getMaxDamage() - stack.getDamageValue() - damage <= 0) {
+                            stack.setDamageValue(0);
+                        } else {
+                            stack.hurtAndBreak(damage, player, slot);
+                        }
+                    }
+                } else {
+                    continue;
+                }
+            }
+            total += item.temperature();
+            if (item.heatProtection() != 0 && pools[0] < EnvironmentCorpus.protection(0)) {
+                pools[0] = Math.min(EnvironmentCorpus.protection(0), pools[0] + item.heatProtection());
+            }
+            if (item.coldProtection() != 0 && pools[1] < EnvironmentCorpus.protection(1)) {
+                pools[1] = Math.min(EnvironmentCorpus.protection(1), pools[1] + item.coldProtection());
+            }
+        }
+        return total;
+    }
+
+    static int effectTemperature(ServerPlayer player, State state, int[] pools) {
+        int total = 0;
+        for (MobEffectInstance instance : player.getActiveEffects()) {
+            Identifier effectId = instance.getEffect().unwrapKey()
+                    .map(ResourceKey::identifier).orElse(null);
+            if (effectId == null) {
+                continue;
+            }
+            int[] values = EnvironmentCorpus.effect(effectId);
+            if (values == null) {
+                continue;
+            }
+            int temperature = values[0];
+            if ((state.body() < EnvironmentCorpus.bodyTemperature(3) && temperature > 0)
+                    || (state.body() > EnvironmentCorpus.bodyTemperature(3) && temperature < 0)) {
+                total += temperature;
+            }
+            if (values[1] != 0 && pools[0] < EnvironmentCorpus.protection(0)) {
+                pools[0] = Math.min(EnvironmentCorpus.protection(0), pools[0] + values[1]);
+            }
+            if (values[2] != 0 && pools[1] < EnvironmentCorpus.protection(1)) {
+                pools[1] = Math.min(EnvironmentCorpus.protection(1), pools[1] + values[2]);
+            }
+        }
+        return total;
+    }
+
+    static int acceptanceAdjustment(EnvironmentCorpus.DimensionTable dimension, int environmentCode, int body) {
+        int dimensionAcclimatization = dimension.acclimatization();
+        if (dimensionAcclimatization != EnvironmentCorpus.NO_DIMENSION_ACCLIMATIZATION) {
+            return dimensionAcclimatization;
+        }
+        return switch (environmentCode) {
+            case 1 -> body < EnvironmentCorpus.acclimatization(6)
+                    ? EnvironmentCorpus.acclimatization(7) : 0;
+            case 2 -> {
+                if (body < EnvironmentCorpus.acclimatization(4)) {
+                    yield EnvironmentCorpus.acclimatization(5);
+                }
+                if (body > EnvironmentCorpus.acclimatization(0)) {
+                    yield EnvironmentCorpus.acclimatization(1);
+                }
+                yield 0;
+            }
+            case 3 -> body > EnvironmentCorpus.acclimatization(2)
+                    ? EnvironmentCorpus.acclimatization(3) : 0;
+            default -> 0;
+        };
     }
 
     /**
-     * Everything the environment adds on top of the biome target: nearby fires
-     * and ice, hot/cold carried items, and the dimension modifier rows
-     * (day/night, armor, wetness, shadow, height) from the migrated corpus.
-     * Package-private so gametests can exercise the whole model, not just the
-     * individual tables.
+     * Reference protection/resistance consumption, with the upstream sign
+     * slip fixed (leftover delta is reduced, never doubled). {@code pools}
+     * is {@code [heatProtection, coldProtection]} and {@code resistances} is
+     * {@code [heatResistance, coldResistance]}; both are mutated. Incoming
+     * cold only consumes cold pools and incoming heat only hot pools, exactly
+     * like the original. Package-private for gametests.
      */
-    static double environmentAdjustment(ServerPlayer player, double current, double target,
-            boolean isNight, boolean isOutside, boolean hasInsulation, boolean hasIce) {
-        HearthwindSurvivalConfig.Temperature cfg = HearthwindSurvivalConfig.get().temperature;
-
-        // Data-driven heat/cold sources: this is what makes shelter and
-        // campfires matter. Without a corpus installed this contributes 0.
-        if (cfg.heatBlockRadius > 0) {
-            int surroundings = EnvironmentCorpus.blockHeat(
-                    player, cfg.heatBlockRadius, (float) cfg.roomHeatFactor, cfg.enclosedRadius)
-                    + EnvironmentCorpus.itemHeat(player);
-            target += surroundings;
-        }
-
-        EnvironmentCorpus.DimensionTable table = cfg.useEnvironmentzTables
-                ? EnvironmentCorpus.dimension(player.level().dimension().identifier()) : null;
-        if (table == null && cfg.useEnvironmentzTables) {
-            table = EnvironmentCorpus.dimension(
-                    Identifier.fromNamespaceAndPath("minecraft", "overworld"));
-        }
-        if (table != null && !table.basic()) {
-            // corpus-driven: the biome band picks the row, so a desert noon and
-            // a taiga night pull in opposite directions exactly as the
-            // reference model does
-            int band = EnvironmentCorpus.band(player.level().getBiome(player.blockPosition()));
-            target += table.standard(band);
-            target += isNight ? table.modifier("night", band) : table.modifier("day", band);
-            if (armorPieces(player) > 0) {
-                target += table.modifier("armor", band);
+    static int consumeProtection(int calc, int environmentCode, int[] pools, int[] resistances) {
+        if (environmentCode < 2 && calc < 0) {
+            if (resistances[1] > 0) {
+                int difference = -calc;
+                if (resistances[1] >= difference) {
+                    calc = 0;
+                    resistances[1] -= difference;
+                } else {
+                    calc += resistances[1];
+                    resistances[1] = 0;
+                }
             }
-            if (hasInsulation) {
-                target += table.modifier("insulated_armor", band);
+            if (calc < 0 && pools[1] > 0) {
+                int difference = -calc;
+                if (pools[1] >= difference) {
+                    calc = 0;
+                    pools[1] -= difference;
+                } else {
+                    calc += pools[1];
+                    pools[1] = 0;
+                }
             }
-            if (hasIce) {
-                target += table.modifier("iced_armor", band);
+        } else if (environmentCode > 2 && calc > 0) {
+            if (resistances[0] > 0) {
+                int difference = calc;
+                if (resistances[0] >= difference) {
+                    calc = 0;
+                    resistances[0] -= difference;
+                } else {
+                    calc -= resistances[0];
+                    resistances[0] = 0;
+                }
             }
-            if (player.isInWater()) {
-                target += table.modifier("soaked", band);
-            } else if (player.level().isRainingAt(player.blockPosition())) {
-                target += table.modifier("wett", band);
-            }
-            if (!isOutside) {
-                target += table.modifier("shadow", band);
-            }
-            if (table.hasHeight()) {
-                target += table.heightAt(player.blockPosition().getY());
-            }
-            if (band >= 3 && current > 0) {
-                target += table.modifier("sweat", band);
-            }
-            // NOTE: the corpus acclimatization values live on the reference
-            // mod's accumulated integer scale (thresholds 180/1680), not on our
-            // -10..+10 body scale, so they are loaded and exposed but
-            // deliberately not applied here.
-        } else {
-            // Fallback: the hand-tuned constants below, used when no corpus is
-            // installed or the tables are disabled in the config.
-            ItemStack[] armor = new ItemStack[]{
-                    player.getItemBySlot(EquipmentSlot.HEAD),
-                    player.getItemBySlot(EquipmentSlot.CHEST),
-                    player.getItemBySlot(EquipmentSlot.LEGS),
-                    player.getItemBySlot(EquipmentSlot.FEET)};
-            int warmPieces = countTag(armor, EnvironmentzItems.WARM_ARMOR);
-            int neutralPieces = countTag(armor, EnvironmentzItems.NON_AFFECTING_ARMOR);
-            if (target < current && warmPieces > 0) {
-                target += warmPieces * 1.2 + warmPieces * warmPieces * 0.3;
-            }
-            target *= 1.0 - 0.08 * neutralPieces;
-            if (current > 0 && hasIce) {
-                target -= 1.5;
-            }
-            if (current < 0 && hasInsulation) {
-                target += 1.5;
-            }
-            if (isNight && isOutside) {
-                target -= 3.5; // desert 9 -> 5.5 at night, snowy -8.5 -> -12 (worse)
-            }
-            if (player.blockPosition().getY() > 128) {
-                target += 1.0;
-            } else if (player.blockPosition().getY() < 0) {
-                target -= 1.5;
+            if (calc > 0 && pools[0] > 0) {
+                int difference = calc;
+                if (pools[0] >= difference) {
+                    calc = 0;
+                    pools[0] -= difference;
+                } else {
+                    calc -= pools[0];
+                    pools[0] = 0;
+                }
             }
         }
-        return Math.max(-9.0, Math.min(9.0, target));
+        return calc;
     }
 
-    private static int armorPieces(ServerPlayer player) {
-        int n = 0;
-        for (EquipmentSlot slot : new EquipmentSlot[]{
-                EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET}) {
-            if (!player.getItemBySlot(slot).isEmpty()) {
-                n++;
-            }
+    /**
+     * Reference cutoff/strong acclimatization: in cold environments a body
+     * above "+240" is pushed back down by twice the hot acclimatization, in
+     * hot environments a body below "-240" is pushed up, and otherwise the
+     * absolute +-2400 limits clamp. Package-private for gametests.
+     */
+    static int applyCutoff(int body, int environmentCode) {
+        if (environmentCode < 2 && body > EnvironmentCorpus.bodyTemperature(4)) {
+            return body + EnvironmentCorpus.acclimatization(1) * 2;
         }
-        return n;
+        if (environmentCode > 2 && body < EnvironmentCorpus.bodyTemperature(2)) {
+            return body + EnvironmentCorpus.acclimatization(5) * 2;
+        }
+        if (body < EnvironmentCorpus.bodyTemperature(0)) {
+            return EnvironmentCorpus.bodyTemperature(0);
+        }
+        if (body > EnvironmentCorpus.bodyTemperature(6)) {
+            return EnvironmentCorpus.bodyTemperature(6);
+        }
+        return body;
     }
 
-    private static boolean cooldown(Map<UUID, Long> map, UUID id, long now,
-            long cooldownTicks) {
-        Long last = map.get(id);
-        if (last != null && now - last < cooldownTicks) {
-            return false;
-        }
-        map.put(id, now);
-        return true;
-    }
-
-    static void warn(ServerPlayer player, double temp) {
-        int level = temp <= -9 || temp >= 9 ? 2 : temp <= -6 || temp >= 6 ? 1 : 0;
-        // Per-player warning state
-        Integer prevLevel = warningLevels.get(player.getUUID());
-        if (prevLevel != null && level == prevLevel) {
+    /** Reference band debuffs, with stable modifier ids. */
+    static void applyBandDebuffs(ServerPlayer player, int body) {
+        AttributeInstance speed = player.getAttribute(Attributes.MOVEMENT_SPEED);
+        AttributeInstance damage = player.getAttribute(Attributes.ATTACK_DAMAGE);
+        AttributeInstance attackSpeed = player.getAttribute(Attributes.ATTACK_SPEED);
+        if (speed == null || damage == null || attackSpeed == null) {
             return;
         }
-        warningLevels.put(player.getUUID(), level);
-        if (level == 2) {
-            player.sendOverlayMessage(Component.literal(
-                    "\u26a0 Extreme temperature! Find shelter!"));
-        } else if (level == 1) {
-            player.sendOverlayMessage(Component.literal(
-                    "You feel very " + (temp < 0 ? "cold" : "hot")));
+        int maxCold = EnvironmentCorpus.bodyTemperature(2);
+        int maxHot = EnvironmentCorpus.bodyTemperature(4);
+        int veryCold = EnvironmentCorpus.bodyTemperature(1);
+        int veryHot = EnvironmentCorpus.bodyTemperature(5);
+
+        if (body > maxCold && body < maxHot) {
+            speed.removeModifier(COLD_DEBUFF_ID);
+            damage.removeModifier(HOT_DEBUFF_ID);
+        } else if (body <= maxCold) {
+            if (body <= veryCold) {
+                if (!speed.hasModifier(FREEZING_DEBUFF_ID)) {
+                    speed.addTransientModifier(FREEZING_DEBUFF);
+                    if (!attackSpeed.hasModifier(GENERAL_DEBUFF_ID)) {
+                        attackSpeed.addTransientModifier(GENERAL_DEBUFF);
+                    }
+                }
+                speed.removeModifier(COLD_DEBUFF_ID);
+            } else {
+                if (!speed.hasModifier(COLD_DEBUFF_ID)) {
+                    speed.addTransientModifier(COLD_DEBUFF);
+                }
+                if (speed.hasModifier(FREEZING_DEBUFF_ID)) {
+                    speed.removeModifier(FREEZING_DEBUFF_ID);
+                    attackSpeed.removeModifier(GENERAL_DEBUFF_ID);
+                }
+            }
+        } else if (body >= veryHot) {
+            if (!damage.hasModifier(OVERHEATING_DEBUFF_ID)) {
+                damage.addTransientModifier(OVERHEATING_DEBUFF);
+                if (!attackSpeed.hasModifier(GENERAL_DEBUFF_ID)) {
+                    attackSpeed.addTransientModifier(GENERAL_DEBUFF);
+                }
+            }
+            damage.removeModifier(HOT_DEBUFF_ID);
+        } else {
+            if (!damage.hasModifier(HOT_DEBUFF_ID)) {
+                damage.addTransientModifier(HOT_DEBUFF);
+            }
+            if (damage.hasModifier(OVERHEATING_DEBUFF_ID)) {
+                damage.removeModifier(OVERHEATING_DEBUFF_ID);
+                attackSpeed.removeModifier(GENERAL_DEBUFF_ID);
+            }
         }
+    }
+
+    private static DamageSource createFreezingSource(ServerPlayer player) {
+        return player.damageSources().source(FREEZING);
+    }
+
+    private static CompoundTag customTag(ItemStack stack) {
+        CustomData data = stack.get(DataComponents.CUSTOM_DATA);
+        return data == null ? null : data.copyTag();
+    }
+
+    private static boolean isArmor(ItemStack stack) {
+        var equippable = stack.get(DataComponents.EQUIPPABLE);
+        if (equippable == null) {
+            return false;
+        }
+        return switch (equippable.slot()) {
+            case HEAD, CHEST, LEGS, FEET, BODY -> true;
+            default -> false;
+        };
     }
 }
