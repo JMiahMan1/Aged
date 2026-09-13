@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "athena",
+  "version": "${version}",
+  "name": "Athena",
+  "description": "Crossplatform Baked Model Loader",
+  "authors": ["ThatGravyBoat"],
+  "license": "MIT",
+  "icon": "icon.png",
+  "environment": "*",
+  "mixins": ["athena.mixins.json"],
+  "entrypoints": {
+    "client": [
+      "earth.terrarium.athena.fabric.client.AthenaFabricClient"
+    ]
+  },
+  "custom": {
+    "modmenu": { "badges": ["library"] }
+  },
+  "depends": {
+    "fabric-api": "*",
+    "minecraft": ">=1.21.3"
+  }
+}

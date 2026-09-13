@@ -40,18 +40,17 @@ public record ChippedRecipe(
     }
 
     @Override
-    public @NotNull List<RecipeDisplay> display() {
-        return this.ingredients.stream().map(ChippedRecipeDisplay::create).toList();
+    public boolean showNotification() {
+        return false;
     }
 
     @Override
-    public RecipeBookCategory recipeBookCategory() {
-        return null;
+    public @NotNull String group() {
+        return "";
     }
 
-
     @Override
-    public @NotNull ItemStack assemble(RecipeInput input, HolderLookup.Provider provider) {
+    public @NotNull ItemStack assemble(RecipeInput input) {
         return ItemStack.EMPTY;
     }
 

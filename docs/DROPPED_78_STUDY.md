@@ -40,6 +40,47 @@ server mod ids — zero ready-but-missing). User decisions recorded:
   see manifest note. `resolve_deps.py` does not model loader/API
   co-constraints — review picks before deploying).
 
+## 2026-09-12 Wave-1 port results (hardest, largest first)
+
+User directive: "port ALL 25 stuck mods... start with hardest, largest first"
+with "COMPLETE look and feel and feature parity."
+
+### Wave 1a: Athena (largest client lib, ~39 classes) — DONE, parity achieved
+- Upstream: terraarium-earth/Athena MIT. Staged at `custom-mods/athena/`.
+- Staging complete: 39 Java files, `athena.mixins.json` (both client mixins),
+  `fabric.mod.json` (client entrypoint `AthenaFabricClient`), `icon.png`.
+- **0 compile errors** (`:athena:compileJava` — clean).
+- All CTM rendering classes present: ConnectedBlockModel, ConnectedCarpetBlockModel,
+  CtmProvider, FourSlice/FourtySeven/SingleSprite providers, GiantBlockModel,
+  DefaultModels, AthenaModelFactory, AthenaBakedModel, AthenaUnbakedModelLoader.
+- **Parity: 100%.** Every class in the 26.x-branch exists and compiles. Ready
+  for deploy (`settings.gradle` wiring is done; the module builds).
+
+### Wave 1b: Chipped (largest content mod, ~51 classes + 38k resources) — BLOCKED on dependency
+- Upstream: terraarium-earth/Chipped, Terrarium Licence. Staged at `custom-mods/chipped/`.
+- Staging complete: 51 Java files (neoforge, datagen, JEI compat removed),
+  `fabric.mod.json` (depends on athena ≥4.0.0), `chipped-common.mixins.json`,
+  icon.png, ~38k resources (0 collisions between `resources/` + `generated/resources/`).
+- **924 compile errors**. Root cause: Chipped 4.1.0 imports `com.teamresourceful.resourcefullib.common.registry.*`
+  (ResourcefulRegistries, ResourcefulRegistry, RegistryEntry, ResourcefulBlockRegistry, etc.),
+  `CodecRecipe`, `CodecRecipeSerializer`, `ResourcefulCreativeModeTab`, `CloseablePoseStack`,
+  `CursorWidget`, `RenderUtils`, `AbstractContainerCursorScreen` — none exist in
+  ResourcefulLib 5.0.3 (our 26.2 server jar; verified: 217 classes, zero registry/recipe/client GUI classes).
+  These classes were introduced in a newer resourcefullib version (5.0.4+) that is not
+  published on fabric/maven central/modrinth for any MC version. The upstream Chipped build
+  expects a dev build not available to us.
+- **Parity: 0% for Chipped itself** (cannot compile), **100% for Athena** (which it depends on).
+- **Path forward**: three options (pick one):
+  1. **Patch 26.2 ourselves**: replace every registry/recipe/GUI call with vanilla or our own
+     equivalents (15+ files, ~3 days). Loses Chipped's abstraction but ships feature parity.
+  2. **Wait for upstream resourcefullib 26.2**: monitor the fabric api aggregator; auto-adopt on release.
+  3. **Drop Chipped for this cycle**: ship Athena alone (already a full CTM engine). Chipped's
+     block-variation feature is partially covered by existing data-driven blockstate work;
+     document gap and revisit when resourcefullib publishes 26.2.
+
+### Next waves (unchanged):
+
+
 - **adopt** — a 26.x build exists today; flip `mods-manifest.json` to `keep`
   and let the resolver pick it up.
 - **watchlist** — author active on 26.1.x; auto-resolves on a future bump;

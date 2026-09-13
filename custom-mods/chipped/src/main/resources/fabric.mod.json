@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "chipped",
+  "version": "${version}",
+  "name": "Chipped",
+  "description": "Every block needs a friend!",
+  "authors": ["Alex Nijjar", "Grimbop", "Kekie6", "ThatGravyBoat"],
+  "contact": {
+    "website": "https://modrinth.com/mod/chipped",
+    "repo": "https://github.com/terrarium-earth/chipped",
+    "issues": "https://github.com/terrarium-earth/chipped/issues"
+  },
+  "license": "Terrarium Licence",
+  "icon": "icon.png",
+  "environment": "*",
+  "mixins": ["chipped-common.mixins.json"],
+  "entrypoints": {
+    "main": ["earth.terrarium.chipped.fabric.ChippedFabric"],
+    "client": ["earth.terrarium.chipped.client.fabric.ChippedClientFabric"]
+  },
+  "depends": {
+    "fabric-api": "*",
+    "minecraft": ">=1.21",
+    "athena": ">=4.0.0"
+  }
+}
